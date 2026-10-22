@@ -1,0 +1,77 @@
+# GitLab equivalent of .github/workflows/release.yml (same scripts).
+# Not yet exercised on GitLab: check runner tags for your instance. The macOS job
+# needs a macOS runner (GitLab SaaS macOS runners, or a self-hosted Mac).
+
+stages: [build, image, release]
+
+variables:
+  IMAGE: $CI_REGISTRY_IMAGE
+
+.linux:
+  stage: build
+  image: docker:27
+  services: [docker:27-dind]
+  before_script:
+    - apk add --no-cache bash git
+  script:
+    - scripts/build-linux.sh $ARCH
+  artifacts:
+    paths: [dist/linux-$ARCH/]
+
+linux-amd64:
+  extends: .linux
+  variables: { ARCH: amd64 }
+
+linux-arm64:
+  extends: .linux
+  variables: { ARCH: arm64 }
+  tags: [saas-linux-medium-arm64]
+
+macos-arm64:
+  stage: build
+  tags: [saas-macos-medium-m1]
+  script:
+    - brew install pkg-config jpeg-turbo
+    - curl -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain none
+    - export PATH="$HOME/.cargo/bin:$PATH"
+    - scripts/build-macos.sh
+  artifacts:
+    paths: [dist/macos-arm64/]
+
+image:
+  stage: image
+  image: docker:27
+  services: [docker:27-dind]
+  needs: [linux-amd64, linux-arm64]
+  rules:
+    - if: $CI_COMMIT_TAG || $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+  script:
+    - chmod +x dist/*/lk-latency
+    - docker login -u "$CI_REGISTRY_USER" -p "$CI_REGISTRY_PASSWORD" "$CI_REGISTRY"
+    - docker run --privileged --rm tonistiigi/binfmt --install arm64
+    - docker buildx create --use
+    - TAG=${CI_COMMIT_TAG:-edge}
+    - docker buildx build --target image --platform linux/amd64,linux/arm64 -t "$IMAGE:$TAG" -t "$IMAGE:$CI_COMMIT_SHORT_SHA" --push .
+
+release:
+  stage: release
+  image: alpine:3.20
+  needs: [linux-amd64, linux-arm64, macos-arm64, image]
+  rules:
+    - if: $CI_COMMIT_TAG =~ /^v/
+  script:
+    - apk add --no-cache bash coreutils tar curl
+    - chmod +x dist/*/lk-latency && scripts/package.sh "$CI_COMMIT_TAG"
+    - |
+      for f in dist/*.tar.gz dist/SHA256SUMS; do
+        curl --fail -H "JOB-TOKEN: $CI_JOB_TOKEN" --upload-file "$f" \
+          "$CI_API_V4_URL/projects/$CI_PROJECT_ID/packages/generic/lk-latency/$CI_COMMIT_TAG/$(basename "$f")"
+      done
+  release:
+    tag_name: $CI_COMMIT_TAG
+    description: lk-latency $CI_COMMIT_TAG
+    assets:
+      links:
+        - { name: macOS arm64, url: "$CI_API_V4_URL/projects/$CI_PROJECT_ID/packages/generic/lk-latency/$CI_COMMIT_TAG/lk-latency-$CI_COMMIT_TAG-macos-arm64.tar.gz" }
+        - { name: Linux x64, url: "$CI_API_V4_URL/projects/$CI_PROJECT_ID/packages/generic/lk-latency/$CI_COMMIT_TAG/lk-latency-$CI_COMMIT_TAG-linux-amd64.tar.gz" }
+        - { name: Linux arm64, url: "$CI_API_V4_URL/projects/$CI_PROJECT_ID/packages/generic/lk-latency/$CI_COMMIT_TAG/lk-latency-$CI_COMMIT_TAG-linux-arm64.tar.gz" }

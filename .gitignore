@@ -1,0 +1,6 @@
+/target
+/dist
+/results
+*.env
+.env*
+__pycache__

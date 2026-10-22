@@ -1,0 +1,5 @@
+# LiveKit Cloud Canada/EU/India/Japan/US static ranges, checked 2026-10-16.
+# https://docs.livekit.io/deploy/admin/regions/endpoints/#static-ips
+143.223.88.0/21
+161.115.160.0/19
+153.57.128.0/18

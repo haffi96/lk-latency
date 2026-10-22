@@ -1,0 +1,8 @@
+# Only sources and the prebuilt Linux binaries; never credentials or build output.
+target
+results
+.git
+**/*.env
+**/.env*
+dist/macos-*
+dist/*.tar.gz

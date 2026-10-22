@@ -1,0 +1,57 @@
+[package]
+name = "lk-latency"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "LiveKit video latency harness: publisher, viewer, and orchestrator in one binary"
+
+[[bin]]
+name = "lk-latency"
+path = "src/main.rs"
+
+# The SDK is pinned to one upstream commit so every build (native and Docker,
+# every platform) uses the same SDK and libwebrtc. Bump all three together.
+[dependencies]
+livekit = { git = "https://github.com/livekit/rust-sdks", rev = "524123ee0069e8c01342c90978ad0dd5e4c58275", features = ["rustls-tls-native-roots"] }
+livekit-api = { git = "https://github.com/livekit/rust-sdks", rev = "524123ee0069e8c01342c90978ad0dd5e4c58275", features = ["rustls-tls-native-roots"] }
+yuv-sys = { git = "https://github.com/livekit/rust-sdks", rev = "524123ee0069e8c01342c90978ad0dd5e4c58275", features = ["jpeg"] }
+tokio = { version = "1", features = ["full", "parking_lot"] }
+tokio-stream = "0.1"
+futures = "0.3"
+clap = { version = "4.5", features = ["derive", "env"] }
+log = "0.4"
+env_logger = "0.11"
+eframe = { version = "0.35.0", default-features = false, features = ["default_fonts", "wgpu", "persistence"] }
+egui = "0.35.0"
+egui-wgpu = "0.35.0"
+image = "0.25"
+wgpu = "29.0"
+winit = { version = "0.30.13", features = ["android-native-activity"] }
+parking_lot = { version = "0.12", features = ["deadlock_detection"] }
+anyhow = "1.0"
+chrono = "0.4.38"
+bytemuck = { version = "1.16", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1.0"
+sha2 = "0.10"
+libc = "0.2"
+nokhwa = { git = "https://github.com/l1npengtul/nokhwa", rev = "4923ecab7cf26f9dba83867a15a9d8662d021296", default-features = false, features = ["output-threaded"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+nokhwa = { git = "https://github.com/l1npengtul/nokhwa", rev = "4923ecab7cf26f9dba83867a15a9d8662d021296", default-features = false, features = ["input-avfoundation"] }
+metal = "0.32"
+objc2 = { version = "0.6.0", features = ["relax-sign-encoding"] }
+objc2-metal = "0.3.2"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+nokhwa = { git = "https://github.com/l1npengtul/nokhwa", rev = "4923ecab7cf26f9dba83867a15a9d8662d021296", default-features = false, features = ["input-v4l"] }
+
+[build-dependencies]
+cc = { version = "1.0", features = ["parallel"] }
+
+# Optimize for speed (upstream examples optimize for size); the harness measures latency.
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = "symbols"

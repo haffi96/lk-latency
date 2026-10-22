@@ -836,7 +836,51 @@ mod tests {
     }
 }
 
+/// macOS only delivers camera frames once the user has granted camera access to the
+/// app that launched us (the terminal, IDE, ...). Without it AVFoundation opens the
+/// device but never produces a frame, so check up front and fail with instructions.
+fn ensure_camera_permission() -> Result<()> {
+    if !cfg!(target_os = "macos") || nokhwa::nokhwa_check() {
+        return Ok(());
+    }
+    info!("Requesting camera access (macOS may show a permission prompt)...");
+    let (tx, rx) = std::sync::mpsc::channel();
+    nokhwa::nokhwa_initialize(move |granted| {
+        let _ = tx.send(granted);
+    });
+    match rx.recv_timeout(Duration::from_secs(60)) {
+        Ok(true) => Ok(()),
+        Ok(false) => anyhow::bail!(
+            "camera access denied. Allow the app running lk-latency (Terminal, iTerm, your IDE, ...) in \
+             System Settings > Privacy & Security > Camera, restart that app, and try again"
+        ),
+        Err(_) => anyhow::bail!("timed out waiting for the macOS camera permission prompt"),
+    }
+}
+
+/// Exits the process if the camera has not produced its first frame in time. A stalled
+/// camera blocks inside `Camera::frame()`, where Ctrl-C and timeouts cannot reach it, and
+/// the SDK would meanwhile publish black keepalive frames without timing metadata.
+fn spawn_first_frame_watchdog(first_frame: Arc<AtomicBool>, timeout: Duration) {
+    std::thread::spawn(move || {
+        std::thread::sleep(timeout);
+        if !first_frame.load(Ordering::Acquire) {
+            log::error!(
+                "camera produced no frames within {}s; check that it is not in use by another app{}",
+                timeout.as_secs(),
+                if cfg!(target_os = "macos") {
+                    " and that camera access is allowed in System Settings > Privacy & Security > Camera"
+                } else {
+                    ""
+                }
+            );
+            std::process::exit(1);
+        }
+    });
+}
+
 fn list_cameras() -> Result<()> {
+    ensure_camera_permission()?;
     let cams = nokhwa::query(ApiBackend::Auto)?;
     println!("Available cameras:");
     for (i, cam) in cams.iter().enumerate() {
@@ -1068,6 +1112,7 @@ async fn run(args: Args, ctrl_c_received: Arc<AtomicBool>) -> Result<()> {
                 (width, height, VideoInput::TestPattern(pattern))
             } else {
                 // Setup camera
+                ensure_camera_permission()?;
                 let index = CameraIndex::Index(args.camera_index as u32);
                 let requested = RequestedFormat::new::<RgbFormat>(
                     RequestedFormatType::AbsoluteHighestFrameRate,
@@ -1416,6 +1461,10 @@ async fn run_capture_loop(
     let mut timestamp_overlay = (config.attach_timestamp && config.burn_timestamp)
         .then(|| TimestampOverlay::new(width, height));
     let align_buffers_for_display = display_shared.is_some();
+    let camera_first_frame = Arc::new(AtomicBool::new(false));
+    if matches!(video_input, VideoInput::Camera { .. }) {
+        spawn_first_frame_watchdog(camera_first_frame.clone(), Duration::from_secs(10));
+    }
 
     loop {
         if ctrl_c_received.load(Ordering::Acquire) {
@@ -1474,6 +1523,7 @@ async fn run_capture_loop(
                 // Capture the frame as early as possible so the attached timestamp is
                 // close to the camera acquisition point.
                 let frame_buf = camera.frame()?;
+                camera_first_frame.store(true, Ordering::Release);
                 let read_wall_time_us = unix_time_us_now();
                 let camera_frame_acquired_at = Instant::now();
 

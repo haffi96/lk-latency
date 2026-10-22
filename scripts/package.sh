@@ -11,4 +11,4 @@ for dir in */; do
   cp ../README.md "$platform/"
   tar -czf "lk-latency-$version-$platform.tar.gz" -C "$platform" lk-latency README.md
 done
-sha256sum ./*.tar.gz */lk-latency | tee SHA256SUMS
+sha256sum *.tar.gz */lk-latency | tee SHA256SUMS

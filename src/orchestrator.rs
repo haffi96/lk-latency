@@ -840,7 +840,11 @@ fn mode_run(args: RunArgs) -> Result<i32> {
         }
         let published = publisher.published.load(Ordering::SeqCst);
         if !published {
-            log("Publisher did not publish before the startup timeout");
+            log(if publisher.running() {
+                "Publisher did not publish before the startup timeout"
+            } else {
+                "Publisher exited before publishing (see its error above)"
+            });
         }
         let mut started = vec![];
         if published {

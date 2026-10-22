@@ -75,7 +75,9 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: ${{ env.IMAGE }}
+          # Versioned tags match the git tag (v0.1.0), as on GitLab, plus the bare semver (0.1.0).
           tags: |
+            type=ref,event=tag
             type=semver,pattern={{version}}
             type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
             type=raw,value=edge,enable=${{ github.ref == 'refs/heads/main' }}

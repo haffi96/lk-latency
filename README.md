@@ -30,22 +30,51 @@ chmod 600 ~/.config/lk-latency/cloud.env
 **Docker** (macOS or Linux):
 
 ```sh
-IMG=ghcr.io/<owner>/lk-latency:latest
+IMG=ghcr.io/haffi96/lk-latency:latest      # or a release tag, e.g. :v0.2.0
 docker run --rm --env-file ~/.config/lk-latency/cloud.env -v "$PWD/results:/results" $IMG run --viewer-region eu
 ```
 
-**Native** binary from the releases page:
+`latest` is the newest release, `edge` is the newest `main` build, and each
+release is also tagged with its version. The image is multi-arch (amd64, arm64),
+so Docker Desktop on Apple Silicon runs the arm64 Linux binary without emulation.
+
+**Native** binary from the releases page (platforms: `macos-arm64`,
+`linux-amd64`, `linux-arm64`):
 
 ```sh
-curl -fsSL -o lk.tgz https://github.com/<owner>/lk-latency/releases/download/<version>/lk-latency-<version>-macos-arm64.tar.gz
-tar -xzf lk.tgz && ./lk-latency version
+V=v0.1.0 P=macos-arm64
+BASE=https://github.com/haffi96/lk-latency/releases/download/$V
+curl -fsSL -O $BASE/lk-latency-$V-$P.tar.gz -O $BASE/SHA256SUMS
+shasum -a 256 -c --ignore-missing SHA256SUMS   # or: sha256sum -c --ignore-missing SHA256SUMS
+tar -xzf lk-latency-$V-$P.tar.gz && ./lk-latency version
 set -a; . ~/.config/lk-latency/cloud.env; set +a
 ```
+
+`lk-latency version` prints the binary's SHA-256, which matches the
+`<platform>/lk-latency` line in `SHA256SUMS`.
 
 The macOS binary is unsigned. Downloading it with `curl` avoids Gatekeeper's
 quarantine. If you downloaded it in a browser, clear the flag with
 `xattr -d com.apple.quarantine lk-latency`. The Linux binary needs a glibc 2.35+
 distro (Ubuntu 22.04+, Debian 12+).
+
+**macOS camera access:** `--source camera` needs camera permission for the app
+that runs `lk-latency` (Terminal, iTerm, your IDE, …). The first camera run
+triggers the macOS prompt. If access was denied, allow the app in System Settings
+→ Privacy & Security → Camera, then restart the app. If no camera frame arrives
+within 10 s, the publisher exits with an error rather than publishing black
+frames.
+
+**Local server** (no cloud account; useful to check a setup):
+
+```sh
+brew install livekit   # or see https://docs.livekit.io/home/self-hosting/local/
+livekit-server --dev &
+LIVEKIT_URL=ws://127.0.0.1:7880 LIVEKIT_API_KEY=devkey LIVEKIT_API_SECRET=secret \
+  ./lk-latency run --viewer-region default --duration 10
+```
+
+From Docker, use `LIVEKIT_URL=ws://host.docker.internal:7880`.
 
 ## Measure
 

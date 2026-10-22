@@ -6,7 +6,7 @@ use livekit::options::{
     VideoEncoderBackend, VideoEncoding, VideoPreset,
 };
 use livekit::prelude::*;
-#[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+#[cfg(lk_argus)]
 use livekit::webrtc::video_frame::native::{DmaBufPixelFormat, NativeBuffer};
 use livekit::webrtc::video_frame::{FrameMetadata, I420Buffer, VideoFrame, VideoRotation};
 use livekit::webrtc::video_source::native::NativeVideoSource;
@@ -31,7 +31,7 @@ use std::sync::{
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use yuv_sys;
 
-#[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+#[cfg(lk_argus)]
 use crate::argus;
 use crate::connection_info;
 use crate::data_probe;
@@ -858,7 +858,7 @@ enum VideoInput {
         camera: Camera,
         is_yuyv: bool,
     },
-    #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+    #[cfg(lk_argus)]
     Argus(argus::ArgusCaptureSession),
 }
 
@@ -1015,7 +1015,7 @@ async fn run(args: Args, ctrl_c_received: Arc<AtomicBool>) -> Result<()> {
 
     let (width, height, video_input) = match args.source {
         SourceKind::Argus => {
-            #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+            #[cfg(lk_argus)]
             {
                 if args.test_pattern {
                     anyhow::bail!("--test-pattern is not supported with --source argus");
@@ -1043,7 +1043,7 @@ async fn run(args: Args, ctrl_c_received: Arc<AtomicBool>) -> Result<()> {
                 );
                 (session.width(), session.height(), VideoInput::Argus(session))
             }
-            #[cfg(not(all(target_os = "linux", target_arch = "aarch64")))]
+            #[cfg(not(lk_argus))]
             {
                 anyhow::bail!(
                     "--source argus requires Linux aarch64 on NVIDIA Jetson; this binary was built for {}-{}",
@@ -1293,7 +1293,7 @@ async fn run(args: Args, ctrl_c_received: Arc<AtomicBool>) -> Result<()> {
     ));
 
     match video_input {
-        #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+        #[cfg(lk_argus)]
         VideoInput::Argus(session) => {
             let capture_result = run_argus_capture_loop(
                 capture_config,
@@ -1612,7 +1612,7 @@ async fn run_capture_loop(
                     true,
                 )
             }
-            #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+            #[cfg(lk_argus)]
             VideoInput::Argus(_) => {
                 // The Argus source bypasses this loop entirely and is dispatched to
                 // `run_argus_capture_loop` from `run`. This arm exists only to satisfy
@@ -1775,7 +1775,7 @@ async fn run_capture_loop(
 /// dedicated OS thread and pushes NV12 DMA-buffer fds straight into `NativeVideoSource`
 /// as [`NativeBuffer::from_dmabuf`] frames for zero-copy hand-off to the Jetson
 /// hardware encoder.
-#[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+#[cfg(lk_argus)]
 async fn run_argus_capture_loop(
     config: CaptureConfig,
     ctrl_c_received: Arc<AtomicBool>,

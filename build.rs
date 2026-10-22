@@ -2,6 +2,9 @@ use std::path::PathBuf;
 
 fn main() {
     stamp_versions();
+    // `lk_argus` is set only when the Jetson Argus shim is actually built, so a
+    // generic arm64 Linux build doesn't reference symbols it can't link.
+    println!("cargo::rustc-check-cfg=cfg(lk_argus)");
 
     let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
     let target_arch = std::env::var("CARGO_CFG_TARGET_ARCH").unwrap_or_default();
@@ -28,6 +31,7 @@ fn main() {
         .flag("-std=c++14")
         .flag("-Wno-deprecated-declarations")
         .compile("lk_argus");
+    println!("cargo:rustc-cfg=lk_argus");
 
     // Link Argus client library (talks to nvargus-daemon) and NvBufSurface
     println!("cargo:rustc-link-lib=dylib=nvargus_socketclient");

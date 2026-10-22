@@ -5,7 +5,7 @@
 //! `lk-latency publisher …` / `lk-latency subscriber …`, so every measurement in a
 //! run, native or in Docker, uses identical code.
 
-#[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+#[cfg(lk_argus)]
 mod argus;
 mod codec_display;
 mod connection_info;

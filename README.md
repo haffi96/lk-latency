@@ -14,7 +14,14 @@ natively or in Docker.
 
 ## Credentials
 
-Never put credentials in an image or a repo. Keep them in a private file:
+Pass them on the command line (works the same in Docker):
+
+```sh
+lk-latency run --url wss://<project>.livekit.cloud --api-key <key> --api-secret <secret> --viewer-region eu
+```
+
+Or, to avoid retyping them (and keep the secret out of shell history), put them in a
+private file and load it. The flags override the file.
 
 ```sh
 mkdir -p ~/.config/lk-latency && cat > ~/.config/lk-latency/cloud.env <<'EOF'
@@ -25,13 +32,16 @@ EOF
 chmod 600 ~/.config/lk-latency/cloud.env
 ```
 
+Never put credentials in an image or a repo. They are redacted from saved logs.
+
 ## Install
 
 **Docker** (macOS or Linux):
 
 ```sh
 IMG=ghcr.io/haffi96/lk-latency:latest      # or a release tag, e.g. :v0.2.0
-docker run --rm --env-file ~/.config/lk-latency/cloud.env -v "$PWD/results:/results" $IMG run --viewer-region eu
+docker run --rm -v "$PWD/results:/results" $IMG run --url wss://<project>.livekit.cloud --api-key <key> --api-secret <secret> --viewer-region eu
+# or: docker run --rm --env-file ~/.config/lk-latency/cloud.env -v "$PWD/results:/results" $IMG run --viewer-region eu
 ```
 
 `latest` is the newest release, `edge` is the newest `main` build, and each
@@ -70,11 +80,10 @@ frames.
 ```sh
 brew install livekit   # or see https://docs.livekit.io/home/self-hosting/local/
 livekit-server --dev &
-LIVEKIT_URL=ws://127.0.0.1:7880 LIVEKIT_API_KEY=devkey LIVEKIT_API_SECRET=secret \
-  ./lk-latency run --viewer-region default --duration 10
+./lk-latency run --url ws://127.0.0.1:7880 --api-key devkey --api-secret secret --duration 10
 ```
 
-From Docker, use `LIVEKIT_URL=ws://host.docker.internal:7880`.
+From Docker, use `--url ws://host.docker.internal:7880`.
 
 ## Measure
 
@@ -111,7 +120,7 @@ accept one of:
 
 - a region slug: `eu`, `us`, `india`, `japan`, `canada`, `uae`, …, which maps to
   `<project>.<slug>.rtc.livekit.cloud` (`uae` maps to the Dubai cluster);
-- `default`: `LIVEKIT_URL` unchanged;
+- `default`: the `--url` / `LIVEKIT_URL` endpoint unchanged;
 - a full `wss://` URL.
 
 For known slugs the server-reported region is verified, and a mismatch fails the run.

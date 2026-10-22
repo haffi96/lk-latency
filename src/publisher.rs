@@ -1419,6 +1419,24 @@ async fn run(args: Args, ctrl_c_received: Arc<AtomicBool>) -> Result<()> {
     if let Some(probe) = data_probe {
         probe.finish().await;
     }
+    close_room(&room).await?;
+    Ok(())
+}
+
+/// `Room::close()` unpublishes our tracks, which schedules a publisher renegotiation
+/// (debounced by the SDK's `PUBLISHER_NEGOTIATION_FREQUENCY`, 150 ms), and then closes
+/// the peer connection underneath it, so the SDK logs "failed to negotiate the
+/// publisher". Unpublish first and let that renegotiation run while the connection is
+/// still open; `close()` then has nothing left to unpublish.
+async fn close_room(room: &Room) -> Result<()> {
+    let local = room.local_participant();
+    let sids: Vec<TrackSid> = local.track_publications().keys().cloned().collect();
+    if !sids.is_empty() {
+        for sid in &sids {
+            let _ = local.unpublish_track(sid).await;
+        }
+        tokio::time::sleep(Duration::from_millis(400)).await;
+    }
     room.close().await?;
     Ok(())
 }

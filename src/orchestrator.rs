@@ -65,7 +65,7 @@ struct Cli {
     command: Mode,
 }
 
-const AFTER_HELP: &str = "Credentials come from LIVEKIT_URL, LIVEKIT_API_KEY, LIVEKIT_API_SECRET.\n\
+const AFTER_HELP: &str = "Credentials: --url/--api-key/--api-secret, or LIVEKIT_URL, LIVEKIT_API_KEY, LIVEKIT_API_SECRET.\n\
 All processes in a measurement must share a clock (one host, or one Docker VM).\n\
 Internal roles: `lk-latency publisher --help`, `lk-latency subscriber --help`.";
 
@@ -200,6 +200,15 @@ struct ViewerArgs {
 
 #[derive(Args, Clone)]
 struct CommonArgs {
+    /// LiveKit server URL, e.g. wss://<project>.livekit.cloud
+    #[arg(long, env = "LIVEKIT_URL", hide_env_values = true)]
+    url: Option<String>,
+    /// LiveKit API key
+    #[arg(long, env = "LIVEKIT_API_KEY", hide_env_values = true)]
+    api_key: Option<String>,
+    /// LiveKit API secret
+    #[arg(long, env = "LIVEKIT_API_SECRET", hide_env_values = true)]
+    api_secret: Option<String>,
     /// Show windows: publisher preview and viewer video with timestamp overlay
     /// (native runs only; not available in Docker)
     #[arg(long)]
@@ -585,6 +594,7 @@ impl Process {
         role: &str,
         args: Vec<String>,
         url: &str,
+        creds: &Credentials,
         secrets: &[String],
         out: &Path,
         verbose: bool,
@@ -594,6 +604,8 @@ impl Process {
             .arg(role)
             .args(&args)
             .env("LIVEKIT_URL", url)
+            .env("LIVEKIT_API_KEY", &creds.api_key)
+            .env("LIVEKIT_API_SECRET", &creds.api_secret)
             .env("RUST_LOG", std::env::var("RUST_LOG").unwrap_or_else(|_| DEFAULT_RUST_LOG.into()))
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
@@ -678,14 +690,34 @@ impl Process {
     }
 }
 
-fn credentials() -> Result<(String, Vec<String>)> {
-    let names = ["LIVEKIT_URL", "LIVEKIT_API_KEY", "LIVEKIT_API_SECRET"];
-    let missing: Vec<_> = names.iter().filter(|n| std::env::var(n).map_or(true, |v| v.is_empty())).collect();
-    if !missing.is_empty() {
-        bail!("Set {missing:?} (e.g. docker run --env-file <file> …, or export them)");
+struct Credentials {
+    url: String,
+    api_key: String,
+    api_secret: String,
+}
+
+impl Credentials {
+    /// Values redacted from child logs.
+    fn secrets(&self) -> Vec<String> {
+        vec![self.url.clone(), self.api_key.clone(), self.api_secret.clone()]
     }
-    let values: Vec<String> = names.iter().map(|n| std::env::var(n).unwrap()).collect();
-    Ok((values[0].clone(), values))
+}
+
+fn credentials(common: &CommonArgs) -> Result<Credentials> {
+    let value = |v: &Option<String>| v.clone().filter(|v| !v.is_empty());
+    let (url, api_key, api_secret) = (value(&common.url), value(&common.api_key), value(&common.api_secret));
+    let missing: Vec<_> = [("--url", &url), ("--api-key", &api_key), ("--api-secret", &api_secret)]
+        .into_iter()
+        .filter(|(_, v)| v.is_none())
+        .map(|(flag, _)| flag)
+        .collect();
+    if !missing.is_empty() {
+        bail!(
+            "missing LiveKit credentials: pass {} (or set LIVEKIT_URL, LIVEKIT_API_KEY, LIVEKIT_API_SECRET, e.g. docker run --env-file <file>)",
+            missing.join(", ")
+        );
+    }
+    Ok(Credentials { url: url.unwrap(), api_key: api_key.unwrap(), api_secret: api_secret.unwrap() })
 }
 
 fn publisher_args(video: &VideoArgs, common: &CommonArgs, room: &str, out: &Path) -> Result<Vec<String>> {
@@ -784,7 +816,8 @@ fn check_display(common: &CommonArgs) -> Result<()> {
 
 fn mode_run(args: RunArgs) -> Result<i32> {
     check_display(&args.common)?;
-    let (base_url, mut secrets) = credentials()?;
+    let creds = credentials(&args.common)?;
+    let (base_url, mut secrets) = (creds.url.clone(), creds.secrets());
     let run_id = args.run_id.clone().unwrap_or_else(|| format!("lk-latency-{}", chrono::Utc::now().format("%Y%m%d-%H%M%S")));
     let out = args.common.output.join(&run_id);
     fs::create_dir_all(&out)?;
@@ -827,7 +860,7 @@ fn mode_run(args: RunArgs) -> Result<i32> {
         log(format!("Iteration {iteration}/{}: room {room}", args.iterations));
         let publisher = Process::spawn(
             "publisher", "publisher", publisher_args(&args.video, &args.common, &room, &session)?,
-            &urls["publisher"], &secrets, &session, args.common.verbose,
+            &urls["publisher"], &creds, &secrets, &session, args.common.verbose,
         )?;
         let deadline = Instant::now() + Duration::from_secs(args.viewer.startup_timeout);
         let mut publisher = publisher;
@@ -852,7 +885,7 @@ fn mode_run(args: RunArgs) -> Result<i32> {
                 let process = Process::spawn(
                     name, "subscriber",
                     viewer_args(&args.viewer, &args.common, &args.video.identity, &room, name, &session),
-                    &urls[name], &secrets, &session, args.common.verbose,
+                    &urls[name], &creds, &secrets, &session, args.common.verbose,
                 )?;
                 started.push((name.clone(), spec.clone(), process));
             }
@@ -911,7 +944,8 @@ fn mode_run(args: RunArgs) -> Result<i32> {
 
 fn mode_publish(args: PublishArgs) -> Result<i32> {
     check_display(&args.common)?;
-    let (base_url, mut secrets) = credentials()?;
+    let creds = credentials(&args.common)?;
+    let (base_url, mut secrets) = (creds.url.clone(), creds.secrets());
     let out = args.common.output.join(&args.room);
     fs::create_dir_all(&out)?;
     let url = resolve_endpoint(&args.region, &base_url)?;
@@ -920,7 +954,7 @@ fn mode_publish(args: PublishArgs) -> Result<i32> {
     log(format!("Publishing to room {} via {}; results={}", args.room, describe_endpoint(&args.region), out.display()));
     let publisher = Process::spawn(
         "publisher", "publisher", publisher_args(&args.video, &args.common, &args.room, &out)?,
-        &url, &secrets, &out, args.common.verbose,
+        &url, &creds, &secrets, &out, args.common.verbose,
     )?;
     let code = match args.duration {
         Some(seconds) => {
@@ -945,7 +979,8 @@ fn mode_publish(args: PublishArgs) -> Result<i32> {
 
 fn mode_view(args: ViewArgs) -> Result<i32> {
     check_display(&args.common)?;
-    let (base_url, mut secrets) = credentials()?;
+    let creds = credentials(&args.common)?;
+    let (base_url, mut secrets) = (creds.url.clone(), creds.secrets());
     let out = args.common.output.join(&args.room);
     fs::create_dir_all(&out)?;
     let url = resolve_endpoint(&args.region, &base_url)?;
@@ -958,7 +993,7 @@ fn mode_view(args: ViewArgs) -> Result<i32> {
     log(format!("Viewing room {} via {}; results={}", args.room, describe_endpoint(&args.region), out.display()));
     let viewer = Process::spawn(
         &name, "subscriber", viewer_args(&args.viewer, &args.common, &args.identity, &args.room, &name, &out),
-        &url, &secrets, &out, args.common.verbose,
+        &url, &creds, &secrets, &out, args.common.verbose,
     )?;
     let code = viewer.wait(Some(Duration::from_secs(
         args.viewer.duration + args.viewer.warmup + args.viewer.startup_timeout + 60,

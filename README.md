@@ -91,7 +91,7 @@ From Docker, use `--url ws://host.docker.internal:7880`.
 # Publisher in EU, simultaneous viewers in EU and US, 5 fresh-room iterations
 lk-latency run --publisher-region eu --viewer-region eu --viewer-region us --duration 30 --iterations 5
 
-# Native only: real camera, hardware encoder, and windows with timestamp overlays
+# Native only: real camera, hardware encoder, and windows with live stats
 lk-latency run --source camera --encoder videotoolbox --codec h264 --display --viewer-region eu
 ```
 
@@ -160,7 +160,7 @@ were never delivered as decoded frames.
     room's existing configuration.
   - `--low-latency` forces zero playout delay on the viewer.
 - **Display:** `--display` opens the publisher preview and the viewer window,
-  each with a stats overlay (press `I` in a window to show/hide it). Everything is
+  each with live stats above the video (press `I` in a window to hide them). Everything is
   still recorded, and the summary adds render time. Native only.
 - **Network:**
   - `--firewall-profile` (Docker with `--cap-add NET_ADMIN`; default `open`)

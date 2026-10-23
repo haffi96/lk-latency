@@ -10,7 +10,7 @@ use livekit::prelude::*;
 use livekit::webrtc::video_frame::BoxVideoFrame;
 use livekit::webrtc::video_stream::native::NativeVideoStream;
 use livekit_api::access_token;
-use log::{debug, info, warn};
+use log::{debug, error, info, warn};
 use parking_lot::{Condvar, Mutex};
 use std::{
     collections::{HashMap, VecDeque},
@@ -1935,20 +1935,38 @@ async fn run(args: Args, ctrl_c_received: Arc<AtomicBool>) -> Result<()> {
         shown_capture_us: None,
     };
     let native_options = viewport_aspect::native_options(None);
-    eframe::run_native(
+    let needs_frames = args.duration.is_some();
+    let watchdog = video_display::close_watchdog(ctrl_c_received.clone(), move || {
+        match finish_windowed_timing(needs_frames) {
+            Ok(()) => 0,
+            Err(error) => {
+                error!("{error}");
+                1
+            }
+        }
+    });
+    let result = eframe::run_native(
         &format!("LiveKit Video Subscriber{}", video_display::OVERLAY_TITLE_HINT),
         native_options,
         Box::new(|_| Ok::<Box<dyn eframe::App>, _>(Box::new(app))),
-    )?;
+    );
+    drop(watchdog);
+    result?;
 
     // If the window was closed manually, still signal shutdown to background threads.
     ctrl_c_received.store(true, Ordering::Release);
+    finish_windowed_timing(needs_frames)?;
+
+    Ok(())
+}
+
+/// Flush the windowed viewer's timing CSV and check that a measured run saw video.
+fn finish_windowed_timing(needs_frames: bool) -> Result<()> {
     WindowedTiming::with(|timing| timing.csv.as_mut().map(|csv| csv.flush()));
     let frames = WindowedTiming::with(|timing| timing.first_frame.is_some()).unwrap_or(false);
-    if args.duration.is_some() && !frames {
+    if needs_frames && !frames {
         anyhow::bail!("No video frames received");
     }
-
     Ok(())
 }
 

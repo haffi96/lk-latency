@@ -4,9 +4,13 @@ use eframe::wgpu::{self, util::DeviceExt};
 use egui_wgpu as egui_wgpu_backend;
 use egui_wgpu_backend::CallbackTrait;
 use parking_lot::Mutex;
-use std::sync::{
-    atomic::{AtomicBool, Ordering},
-    Arc,
+use std::{
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
+    thread,
+    time::{Duration, Instant},
 };
 
 use crate::codec_display::codec_with_implementation;
@@ -495,6 +499,48 @@ type ChannelValues = Arc<Mutex<[f32; crate::user_data::NUM_CHANNELS]>>;
 /// Shows/hides the stats overlay in the publisher and viewer windows.
 pub(crate) const OVERLAY_TOGGLE_KEY: egui::Key = egui::Key::I;
 /// Appended to window titles so the toggle is discoverable.
+/// How long a window may take to close after a stop request before the process exits.
+const CLOSE_GRACE: Duration = Duration::from_secs(5);
+
+/// Exits the process if the window ignores a stop request. A window only closes from
+/// `ui()`, and eframe stops calling `ui()` while the window gets no redraws (seen on
+/// X11 after a screen grab); without this the process would hang until killed and
+/// lose its buffered timing data. Dropping the guard marks the window as closed.
+pub(crate) struct CloseWatchdog(Arc<AtomicBool>);
+
+impl Drop for CloseWatchdog {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::Release);
+    }
+}
+
+/// `on_timeout` flushes what it can and returns the exit code a clean shutdown would use.
+pub(crate) fn close_watchdog(
+    stop: Arc<AtomicBool>,
+    on_timeout: impl FnOnce() -> i32 + Send + 'static,
+) -> CloseWatchdog {
+    let closed = Arc::new(AtomicBool::new(false));
+    let watched = closed.clone();
+    thread::spawn(move || {
+        while !stop.load(Ordering::Acquire) {
+            if watched.load(Ordering::Acquire) {
+                return;
+            }
+            thread::sleep(Duration::from_millis(100));
+        }
+        let deadline = Instant::now() + CLOSE_GRACE;
+        while Instant::now() < deadline {
+            if watched.load(Ordering::Acquire) {
+                return;
+            }
+            thread::sleep(Duration::from_millis(100));
+        }
+        log::warn!("Window did not close within {CLOSE_GRACE:?} of the stop request; exiting");
+        std::process::exit(on_timeout());
+    });
+    CloseWatchdog(closed)
+}
+
 pub(crate) const OVERLAY_TITLE_HINT: &str = " (press I to show/hide stats)";
 /// Flips `visible` when the toggle key is pressed.
 pub(crate) fn handle_overlay_toggle(ctx: &egui::Context, visible: &mut bool) {
@@ -646,7 +692,11 @@ pub(crate) fn run_display(
     };
     let native_options = viewport_aspect::native_options(initial_aspect);
     let title = format!("{title}{OVERLAY_TITLE_HINT}");
+    // Capture has stopped by the time the window is told to close, and the timing log
+    // flushes itself regularly, so exiting cleanly loses at most its last second.
+    let watchdog = close_watchdog(ctrl_c_received.clone(), || 0);
     let result = eframe::run_native(&title, native_options, Box::new(|_| Ok(Box::new(app))));
+    drop(watchdog);
 
     ctrl_c_received.store(true, Ordering::Release);
 

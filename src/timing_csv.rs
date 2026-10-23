@@ -5,10 +5,17 @@ use std::{
     fs::File,
     io::{BufWriter, Write},
     path::Path,
+    time::{Duration, Instant},
 };
 
+/// How often buffered events reach the file, bounding what a killed process loses.
+const FLUSH_INTERVAL: Duration = Duration::from_secs(1);
+
 /// Buffered per-frame timing event log.
-pub(crate) struct TimingCsv(BufWriter<File>);
+pub(crate) struct TimingCsv {
+    writer: BufWriter<File>,
+    last_flush: Instant,
+}
 
 impl TimingCsv {
     /// Create a timing log; existing files are rejected to preserve previous runs.
@@ -16,7 +23,7 @@ impl TimingCsv {
         let file = File::options().write(true).create_new(true).open(path)?;
         let mut writer = BufWriter::new(file);
         writeln!(writer, "track_sid,stage,timestamp_us,capture_timestamp_us,frame_id,measured")?;
-        Ok(Self(writer))
+        Ok(Self { writer, last_flush: Instant::now() })
     }
 
     /// Record a stage using its native observation timestamp, not log-write time.
@@ -30,13 +37,17 @@ impl TimingCsv {
         measured: bool,
     ) -> Result<()> {
         let id = frame_id.map(|id| id.to_string()).unwrap_or_default();
-        writeln!(self.0, "{sid},{stage},{timestamp},{capture},{id},{measured}")?;
+        writeln!(self.writer, "{sid},{stage},{timestamp},{capture},{id},{measured}")?;
+        if self.last_flush.elapsed() >= FLUSH_INTERVAL {
+            self.flush()?;
+        }
         Ok(())
     }
 
     /// Flush buffered events before shutdown.
     pub(crate) fn flush(&mut self) -> Result<()> {
-        self.0.flush()?;
+        self.writer.flush()?;
+        self.last_flush = Instant::now();
         Ok(())
     }
 }

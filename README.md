@@ -161,7 +161,9 @@ were never delivered as decoded frames.
   - `--low-latency` forces zero playout delay on the viewer.
 - **Display:** `--display` opens the publisher preview and the viewer window,
   each with live stats above the video (press `I` in a window to hide them). Everything is
-  still recorded, and the summary adds render time. Native only.
+  still recorded, and the summary adds render time. Native only. The windows open
+  side by side; with `--burn-timestamp`, a screenshot of both shows how far the
+  viewer is behind (accurate to about one frame; average several screenshots).
 - **Network:**
   - `--firewall-profile` (Docker with `--cap-add NET_ADMIN`; default `open`)
     restricts the container's egress. The `static-*` profiles allow only LiveKit

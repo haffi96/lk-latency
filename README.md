@@ -137,6 +137,8 @@ For known slugs the server-reported region is verified, and a mismatch fails the
 | jitter buffer + decode | `DecoderUpload` → `DecoderOutput` | libwebrtc frame buffer / playout delay, decode |
 | decoded → app | `DecoderOutput` → `FrameSink` | delivery to the application |
 | **TOTAL** | capture → `FrameSink` | everything except rendering/display |
+| render | `FrameSink` → `GpuComplete` | `--display` only: drawing the frame in the window |
+| **TOTAL capture → rendered** | capture → `GpuComplete` | `--display` only: until the frame is drawn, ready for the next screen refresh |
 
 Percentiles are computed separately for each stage, so they don't add up to the total.
 `dropped` is the percentage of published frames in the measurement window that
@@ -157,9 +159,9 @@ were never delivered as decoded frames.
     recreated with these settings. `--max-playout-delay server` keeps the
     room's existing configuration.
   - `--low-latency` forces zero playout delay on the viewer.
-- **Display:** `--display` opens the publisher preview and the viewer window
-  with timestamp and latency overlays, and still records everything. Native
-  only.
+- **Display:** `--display` opens the publisher preview and the viewer window,
+  each with a stats overlay (press `I` in a window to show/hide it). Everything is
+  still recorded, and the summary adds render time. Native only.
 - **Network:**
   - `--firewall-profile` (Docker with `--cap-add NET_ADMIN`; default `open`)
     restricts the container's egress. The `static-*` profiles allow only LiveKit

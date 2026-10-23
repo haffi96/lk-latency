@@ -42,7 +42,8 @@ const REGION_ALIASES: &[(&str, &[&str])] = &[
 const PUBLISHER_STAGES: &[&str] = &["EncoderUpload", "EncoderOutput", "WebrtcPacketize"];
 /// (key, label, from stage, to stage); "capture" is the frame's embedded capture time.
 /// DecoderUpload is observed in the frame transformer, before libwebrtc's frame
-/// buffer, so the jitter-buffer wait is inside `buffer_and_decode`.
+/// buffer, so the jitter-buffer wait is inside `buffer_and_decode`. GpuComplete is only
+/// recorded by the windowed viewer (`--display`); the render rows are absent otherwise.
 const SEGMENTS: &[(&str, &str, &str, &str)] = &[
     ("capture_to_encoder", "capture -> encoder", "capture", "EncoderUpload"),
     ("encode", "encode", "EncoderUpload", "EncoderOutput"),
@@ -51,8 +52,10 @@ const SEGMENTS: &[(&str, &str, &str, &str)] = &[
     ("receive_transform", "receive transform", "WebrtcReceive", "DecoderUpload"),
     ("buffer_and_decode", "jitter buffer + decode", "DecoderUpload", "DecoderOutput"),
     ("delivery", "decoded -> app", "DecoderOutput", "FrameSink"),
+    ("render", "render (app -> rendered)", "FrameSink", "GpuComplete"),
     ("capture_to_receive", "capture -> receive", "capture", "WebrtcReceive"),
     ("total", "TOTAL capture -> decoded", "capture", "FrameSink"),
+    ("total_rendered", "TOTAL capture -> rendered", "capture", "GpuComplete"),
 ];
 
 // ---------------------------------------------------------------------------
@@ -1515,8 +1518,9 @@ fn write_summary(out: &Path, header: &str, sessions: &[SessionResult], aggregate
         lines.push(String::new());
     }
     lines.push(
-        "All times in ms. 'TOTAL capture -> decoded' excludes rendering/display. Stage percentiles are computed \
-         independently and do not add up to the total."
+        "All times in ms. 'TOTAL capture -> decoded' excludes rendering; with --display, 'capture -> rendered' \
+         includes drawing the frame, ready for the next screen refresh. Stage percentiles are computed independently and do not add \
+         up to the total."
             .into(),
     );
     let text = lines.join("\n") + "\n";

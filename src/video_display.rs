@@ -434,6 +434,16 @@ mod tests {
     }
 
     #[test]
+    fn overlay_text_rebuilds_at_most_every_refresh_interval() {
+        let mut cache = CachedOverlayText::default();
+        let start = Instant::now();
+        assert_eq!(cache.get(start, || None), "", "nothing to show yet");
+        assert_eq!(cache.get(start, || Some("a".into())), "a", "retried after None");
+        assert_eq!(cache.get(start + Duration::from_millis(99), || Some("b".into())), "a");
+        assert_eq!(cache.get(start + OVERLAY_REFRESH_INTERVAL, || Some("c".into())), "c");
+    }
+
+    #[test]
     fn publisher_overlay_shows_status_without_timing() {
         let shared = Arc::new(Mutex::new(SharedYuv::default()));
         {
@@ -610,11 +620,67 @@ const CHANNEL_RATE_PER_S: f32 = 1.0;
 
 type ChannelValues = Arc<Mutex<[f32; crate::user_data::NUM_CHANNELS]>>;
 
+/// Shows/hides the stats overlay in the publisher and viewer windows.
+pub(crate) const OVERLAY_TOGGLE_KEY: egui::Key = egui::Key::I;
+/// Appended to window titles so the toggle is discoverable.
+pub(crate) const OVERLAY_TITLE_HINT: &str = " (press I to show/hide stats)";
+/// Overlay text refresh rate; readable, and keeps text layout off most video frames.
+const OVERLAY_REFRESH_INTERVAL: Duration = Duration::from_millis(100);
+
+/// Overlay text rebuilt at most every `OVERLAY_REFRESH_INTERVAL`. Between refreshes the
+/// string is unchanged, so egui reuses its cached layout and drawing the overlay costs
+/// only a few hundred vertices on top of the video.
+#[derive(Default)]
+pub(crate) struct CachedOverlayText {
+    text: String,
+    updated_at: Option<Instant>,
+}
+
+impl CachedOverlayText {
+    /// `build` returns `None` until there is something to show; it is retried next frame.
+    pub(crate) fn get(&mut self, now: Instant, build: impl FnOnce() -> Option<String>) -> &str {
+        let due = self
+            .updated_at
+            .map_or(true, |updated_at| now.duration_since(updated_at) >= OVERLAY_REFRESH_INTERVAL);
+        if due {
+            match build() {
+                Some(text) => {
+                    self.text = text;
+                    self.updated_at = Some(now);
+                }
+                None => self.text.clear(),
+            }
+        }
+        &self.text
+    }
+}
+
+/// Flips `visible` when the toggle key is pressed.
+pub(crate) fn handle_overlay_toggle(ctx: &egui::Context, visible: &mut bool) {
+    if ctx.input(|input| input.key_pressed(OVERLAY_TOGGLE_KEY)) {
+        *visible = !*visible;
+    }
+}
+
+/// Translucent panel used for every overlay drawn over video.
+pub(crate) fn overlay_frame() -> egui::Frame {
+    egui::Frame::NONE
+        .fill(egui::Color32::from_black_alpha(160))
+        .corner_radius(egui::CornerRadius::same(4))
+        .inner_margin(egui::Margin::same(6))
+}
+
+pub(crate) fn overlay_label(text: &str) -> egui::Label {
+    egui::Label::new(egui::RichText::new(text).monospace().color(egui::Color32::WHITE)).extend()
+}
+
 struct VideoApp {
     shared: Arc<Mutex<SharedYuv>>,
     ctrl_c_received: Arc<AtomicBool>,
     viewport: AspectConstrainedViewport,
     timing_overlay_state: PublisherTimingOverlayState,
+    overlay_text: CachedOverlayText,
+    overlay_visible: bool,
     /// Keyboard-controlled user_data channel values shared with the capture loop.
     channels: Option<ChannelValues>,
 }
@@ -679,38 +745,31 @@ impl eframe::App for VideoApp {
             );
         });
 
-        egui::Area::new("publisher_overlay".into())
-            .anchor(egui::Align2::LEFT_TOP, egui::vec2(10.0, 10.0))
-            .interactable(false)
-            .show(&ctx, |ui| {
-                let Some(lines) = publisher_overlay_lines(
-                    &self.shared,
-                    &mut self.timing_overlay_state,
-                    Instant::now(),
-                ) else {
-                    return;
-                };
-                let has_timing = lines.len() > 1;
-                let text = lines.join("\n");
-                egui::Frame::NONE
-                    .fill(egui::Color32::from_black_alpha(160))
-                    .corner_radius(egui::CornerRadius::same(4))
-                    .inner_margin(egui::Margin::same(6))
-                    .show(ui, |ui| {
-                        if has_timing {
-                            ui.set_min_width(PUBLISHER_TIMING_LINE_WIDTH as f32 * 8.0);
-                        }
-                        ui.add(
-                            egui::Label::new(
-                                egui::RichText::new(text).monospace().color(egui::Color32::WHITE),
-                            )
-                            .extend(),
-                        );
-                    });
+        handle_overlay_toggle(&ctx, &mut self.overlay_visible);
+        if self.overlay_visible {
+            let (shared, timing_overlay_state) = (&self.shared, &mut self.timing_overlay_state);
+            let now = Instant::now();
+            let text = self.overlay_text.get(now, || {
+                publisher_overlay_lines(shared, timing_overlay_state, now).map(|lines| lines.join("\n"))
             });
+            if !text.is_empty() {
+                let has_timing = text.contains('\n');
+                egui::Area::new("publisher_overlay".into())
+                    .anchor(egui::Align2::LEFT_TOP, egui::vec2(10.0, 10.0))
+                    .interactable(false)
+                    .show(&ctx, |ui| {
+                        overlay_frame().show(ui, |ui| {
+                            if has_timing {
+                                ui.set_min_width(PUBLISHER_TIMING_LINE_WIDTH as f32 * 8.0);
+                            }
+                            ui.add(overlay_label(text));
+                        });
+                    });
+            }
 
-        if let Some(values) = channel_values {
-            paint_channel_controls(&ctx, &values);
+            if let Some(values) = channel_values {
+                paint_channel_controls(&ctx, &values);
+            }
         }
 
         ctx.request_repaint_after(viewport_aspect::VIDEO_REPAINT_INTERVAL);
@@ -760,10 +819,13 @@ pub(crate) fn run_display(
         ctrl_c_received: ctrl_c_received.clone(),
         viewport: AspectConstrainedViewport::new(initial_aspect),
         timing_overlay_state: PublisherTimingOverlayState::default(),
+        overlay_text: CachedOverlayText::default(),
+        overlay_visible: true,
         channels,
     };
     let native_options = viewport_aspect::native_options(initial_aspect);
-    let result = eframe::run_native(title, native_options, Box::new(|_| Ok(Box::new(app))));
+    let title = format!("{title}{OVERLAY_TITLE_HINT}");
+    let result = eframe::run_native(&title, native_options, Box::new(|_| Ok(Box::new(app))));
 
     ctrl_c_received.store(true, Ordering::Release);
 

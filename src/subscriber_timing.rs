@@ -569,6 +569,12 @@ fn latency_log_value(latency_us: Option<u64>) -> String {
     )
 }
 
+/// Overlay line for the frame on screen; updated every paint, matching the burned-in ID.
+pub(crate) fn shown_frame_line(frame_id: Option<u32>) -> String {
+    let frame_id = frame_id.map(|id| id.to_string()).unwrap_or_else(|| "NA".to_string());
+    timing_value_line("showing frame", &frame_id)
+}
+
 fn timing_value_line(label: &str, value: &str) -> String {
     let label = format!("{label}:");
     format!(
@@ -607,7 +613,7 @@ fn build_timing_overlay_lines(
     let base = sample.sensor_exposure_timestamp_us;
     let frame_id = sample.frame_id.map(|id| id.to_string()).unwrap_or_else(|| "NA".to_string());
     let mut lines = vec![
-        timing_value_line("Frame ID", &frame_id),
+        timing_value_line("timing for frame", &frame_id),
         timing_line("sensor exposure", Some(base), &overlay_values.deltas.sensor_exposure),
         timing_line(
             "webrtc receive",
@@ -700,7 +706,7 @@ mod tests {
         assert_eq!(
             lines,
             vec![
-                "Frame ID:                                  123",
+                "timing for frame:                          123",
                 "sensor exposure:       01:02:03:456      0.0ms",
                 "webrtc receive:        01:02:03:488    +32.4ms",
                 "decoder upload:        01:02:03:491     +3.1ms",
@@ -725,7 +731,7 @@ mod tests {
         assert_eq!(
             lines,
             vec![
-                "Frame ID:                                   NA",
+                "timing for frame:                           NA",
                 "sensor exposure:       01:02:03:456      0.0ms",
                 "webrtc receive:        --:--:--:---    +--.-ms",
                 "decoder upload:        --:--:--:---    +--.-ms",

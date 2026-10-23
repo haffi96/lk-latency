@@ -1629,6 +1629,7 @@ impl eframe::App for VideoApp {
             return;
         }
 
+        self.viewport.place_on_screen(&ctx);
         if let Some((width, height)) = self.video_size.load() {
             self.viewport.set_video_size(&ctx, width, height);
         }
@@ -1919,7 +1920,7 @@ async fn run(args: Args, ctrl_c_received: Arc<AtomicBool>) -> Result<()> {
         }
     });
 
-    let viewport = AspectConstrainedViewport::new(None);
+    let viewport = AspectConstrainedViewport::new(None, viewport_aspect::ScreenSide::Right);
     // Start UI
     let app = VideoApp {
         shared,

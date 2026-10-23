@@ -1099,8 +1099,6 @@ mod tests {
         }));
         let simulcast =
             Arc::new(Mutex::new(SimulcastState { available: true, ..Default::default() }));
-        let subscriber_timing = SubscriberTimingHandle::new();
-
         let lines = subscriber_diagnostics_lines(&shared, &simulcast);
 
         assert_eq!(
@@ -2316,6 +2314,8 @@ impl CallbackTrait for YuvPaintCallback {
             state.recreate_bind_group(device);
         }
 
+        // Only the macOS native-import path below reassigns this.
+        #[cfg_attr(not(target_os = "macos"), allow(unused_mut))]
         let mut frame_for_cpu_upload = frame_for_upload;
 
         #[cfg(target_os = "macos")]

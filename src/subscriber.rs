@@ -1101,7 +1101,7 @@ mod tests {
             Arc::new(Mutex::new(SimulcastState { available: true, ..Default::default() }));
         let subscriber_timing = SubscriberTimingHandle::new();
 
-        let lines = subscriber_diagnostics_lines(&shared, &simulcast, false, &subscriber_timing);
+        let lines = subscriber_diagnostics_lines(&shared, &simulcast);
 
         assert_eq!(
             lines,
@@ -1393,8 +1393,6 @@ fn clear_hud_and_simulcast(
 fn subscriber_diagnostics_lines(
     shared: &Arc<Mutex<SharedYuv>>,
     simulcast: &Arc<Mutex<SimulcastState>>,
-    include_timing: bool,
-    subscriber_timing: &SubscriberTimingHandle,
 ) -> Vec<String> {
     let (mut lines, status_line) = {
         let s = shared.lock();
@@ -1418,17 +1416,10 @@ fn subscriber_diagnostics_lines(
         (lines, status_line)
     };
 
-    let has_video = status_line.is_some();
     if let Some(status_line) = status_line {
         lines.push(status_line);
     } else {
         lines.push("Waiting for video...".to_string());
-    }
-
-    if has_video && include_timing {
-        if let Some(mut timing_lines) = subscriber_timing.display_overlay_lines(Instant::now()) {
-            lines.append(&mut timing_lines);
-        }
     }
 
     lines
@@ -1533,24 +1524,19 @@ fn paint_simulcast_controls(ui: &mut egui::Ui, simulcast: &Arc<Mutex<SimulcastSt
     }
 }
 
-fn paint_subscriber_overlay(
+fn paint_subscriber_dock(
     ui: &mut egui::Ui,
-    shown_frame: &str,
-    text: &str,
+    columns: &[Vec<String>],
     simulcast: &Arc<Mutex<SimulcastState>>,
     channel_history: &VecDeque<[f32; user_data::NUM_CHANNELS]>,
 ) {
-    video_display::overlay_frame().show(ui, |ui| {
-        ui.visuals_mut().override_text_color = Some(egui::Color32::WHITE);
-        ui.spacing_mut().item_spacing.y = 0.0;
-        ui.add(video_display::overlay_label(shown_frame));
-        ui.add(video_display::overlay_label(text));
-        if !channel_history.is_empty() {
-            ui.separator();
-            paint_channel_graph(ui, channel_history);
-        }
-        paint_simulcast_controls(ui, simulcast);
-    });
+    for column in columns {
+        video_display::dock_column(ui, column);
+    }
+    if !channel_history.is_empty() {
+        ui.vertical(|ui| paint_channel_graph(ui, channel_history));
+    }
+    ui.vertical(|ui| paint_simulcast_controls(ui, simulcast));
 }
 
 fn handle_track_unsubscribed(
@@ -1629,33 +1615,9 @@ struct VideoApp {
     display_timestamp: bool,
     /// Rolling history of decoded channel values from the user_data trailer.
     channel_history: Arc<Mutex<VecDeque<[f32; user_data::NUM_CHANNELS]>>>,
-    overlay_text: video_display::CachedOverlayText,
-    overlay_visible: bool,
-    /// Frame ID of the frame on screen (the last one handed to the paint callback).
-    shown_frame_id: Option<u32>,
-}
-
-impl VideoApp {
-    /// Stats drawn over the video, in the same window. The text refreshes at 10 Hz
-    /// (see `CachedOverlayText`), so it adds no layout work to most video frames.
-    fn show_overlay(&mut self, ctx: &egui::Context) {
-        video_display::handle_overlay_toggle(ctx, &mut self.overlay_visible);
-        if !self.overlay_visible {
-            return;
-        }
-        let (shared, simulcast, timing) = (&self.shared, &self.simulcast, &self.subscriber_timing);
-        let include_timing = self.display_timestamp;
-        let text = self.overlay_text.get(Instant::now(), || {
-            Some(subscriber_diagnostics_lines(shared, simulcast, include_timing, timing).join("\n"))
-        });
-        let shown = subscriber_timing::shown_frame_line(self.shown_frame_id);
-        let channel_history = self.channel_history.lock().clone();
-        egui::Area::new("subscriber_overlay".into())
-            .anchor(egui::Align2::LEFT_TOP, egui::vec2(10.0, 10.0))
-            .show(ctx, |ui| paint_subscriber_overlay(ui, &shown, text, simulcast, &channel_history));
-        // Keep the text current while no video frames are arriving.
-        ctx.request_repaint_after(Duration::from_millis(100));
-    }
+    stats_visible: bool,
+    /// Capture time of the frame on screen (the last one handed to the paint callback).
+    shown_capture_us: Option<u64>,
 }
 
 impl eframe::App for VideoApp {
@@ -1673,7 +1635,8 @@ impl eframe::App for VideoApp {
 
         let render_frame = self.frame_slot.take();
         if let Some(frame) = render_frame.as_ref() {
-            self.shown_frame_id = frame.frame_metadata.as_ref().and_then(|metadata| metadata.frame_id);
+            self.shown_capture_us =
+                frame.frame_metadata.as_ref().and_then(|metadata| metadata.user_timestamp);
             if let Some(metadata) = &frame.frame_metadata {
                 if let Some(capture_timestamp_us) = metadata.user_timestamp {
                     self.subscriber_timing.record_frame_selected_for_render(
@@ -1684,6 +1647,16 @@ impl eframe::App for VideoApp {
                 }
             }
         }
+
+        let mut columns = vec![subscriber_diagnostics_lines(&self.shared, &self.simulcast)];
+        if self.display_timestamp {
+            columns.extend(self.subscriber_timing.dock_columns(self.shown_capture_us));
+        }
+        let channel_history = self.channel_history.lock().clone();
+        let simulcast = self.simulcast.clone();
+        video_display::show_stats_dock(root_ui, &mut self.stats_visible, |ui| {
+            paint_subscriber_dock(ui, &columns, &simulcast, &channel_history);
+        });
 
         egui::CentralPanel::default().frame(egui::Frame::NONE).show(root_ui, |ui| {
             // Let the native window follow live resize, and letterbox the video instead of
@@ -1707,7 +1680,6 @@ impl eframe::App for VideoApp {
                 },
             );
         });
-        self.show_overlay(&ctx);
     }
 }
 
@@ -1960,9 +1932,8 @@ async fn run(args: Args, ctrl_c_received: Arc<AtomicBool>) -> Result<()> {
         viewport,
         display_timestamp: args.display_timestamp,
         channel_history,
-        overlay_text: video_display::CachedOverlayText::default(),
-        overlay_visible: true,
-        shown_frame_id: None,
+        stats_visible: true,
+        shown_capture_us: None,
     };
     let native_options = viewport_aspect::native_options(None);
     eframe::run_native(

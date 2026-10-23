@@ -568,6 +568,7 @@ impl eframe::App for VideoApp {
         }
 
         register_repaint_context(&self.shared, &ctx);
+        self.viewport.place_on_screen(&ctx);
 
         if let Some((width, height)) = video_size(&self.shared) {
             self.viewport.set_video_size(&ctx, width, height);
@@ -639,7 +640,7 @@ pub(crate) fn run_display(
     let app = VideoApp {
         shared,
         ctrl_c_received: ctrl_c_received.clone(),
-        viewport: AspectConstrainedViewport::new(initial_aspect),
+        viewport: AspectConstrainedViewport::new(initial_aspect, viewport_aspect::ScreenSide::Left),
         stats_visible: true,
         channels,
     };

@@ -9,17 +9,62 @@ const MIN_LONG_EDGE: f32 = 320.0;
 #[allow(dead_code)] // This shared module is compiled separately by binaries with different pacing.
 pub(crate) const VIDEO_REPAINT_INTERVAL: Duration = Duration::from_millis(8);
 const ASPECT_EPSILON: f32 = 0.001;
+/// Height reserved above the video for the stats dock when sizing a placed window.
+const STATS_DOCK_HEIGHT: f32 = 110.0;
+/// Gap between the windows and the screen edges, in points.
+const SCREEN_MARGIN: f32 = 16.0;
+/// Below the menu bar.
+const SCREEN_TOP: f32 = 40.0;
+
+/// Which half of the screen a window opens in, so the publisher and viewer sit side by
+/// side and one screenshot captures both.
+#[derive(Clone, Copy)]
+pub(crate) enum ScreenSide {
+    Left,
+    Right,
+}
 
 pub(crate) struct AspectConstrainedViewport {
     aspect: Option<f32>,
     fit_window_to_first_video_size: bool,
+    side: ScreenSide,
+    /// Video width chosen when the window was placed; later resizes keep it.
+    placed_video_width: Option<f32>,
 }
 
 impl AspectConstrainedViewport {
     /// Creates viewport aspect state for a window using the default startup size.
-    pub(crate) fn new(initial_aspect: Option<f32>) -> Self {
+    pub(crate) fn new(initial_aspect: Option<f32>, side: ScreenSide) -> Self {
         let aspect = initial_aspect.filter(|aspect| valid_aspect(*aspect));
-        Self { aspect, fit_window_to_first_video_size: aspect.is_none() }
+        Self { aspect, fit_window_to_first_video_size: aspect.is_none(), side, placed_video_width: None }
+    }
+
+    /// Once the screen size is known (first frame), moves the window to its half of the
+    /// screen and sizes it to fit there. Window managers that tile may override this.
+    pub(crate) fn place_on_screen(&mut self, ctx: &egui::Context) {
+        if self.placed_video_width.is_some() {
+            return;
+        }
+        let Some(monitor) = ctx.input(|input| input.viewport().monitor_size) else {
+            return;
+        };
+        let aspect = self.aspect.unwrap_or(DEFAULT_ASPECT);
+        let max_height = monitor.y - SCREEN_TOP - SCREEN_MARGIN - STATS_DOCK_HEIGHT;
+        let width = (monitor.x / 2.0 - 1.5 * SCREEN_MARGIN).min(max_height * aspect).max(MIN_LONG_EDGE);
+        self.placed_video_width = Some(width);
+        let x = match self.side {
+            ScreenSide::Left => SCREEN_MARGIN,
+            ScreenSide::Right => monitor.x / 2.0 + SCREEN_MARGIN / 2.0,
+        };
+        ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(egui::pos2(x, SCREEN_TOP)));
+        ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(self.window_size(aspect)));
+    }
+
+    fn window_size(&self, aspect: f32) -> egui::Vec2 {
+        match self.placed_video_width {
+            Some(width) => egui::vec2(width, width / aspect + STATS_DOCK_HEIGHT),
+            None => initial_window_size(Some(aspect)),
+        }
     }
 
     /// Returns the active video aspect ratio when it is known.
@@ -39,9 +84,7 @@ impl AspectConstrainedViewport {
             self.aspect = Some(aspect);
             ctx.send_viewport_cmd(egui::ViewportCommand::MinInnerSize(minimum_window_size(aspect)));
             if fit_window_to_video {
-                ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(initial_window_size(Some(
-                    aspect,
-                ))));
+                ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(self.window_size(aspect)));
             }
         }
         self.fit_window_to_first_video_size = false;

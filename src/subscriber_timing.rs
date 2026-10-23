@@ -625,20 +625,20 @@ fn build_timing_overlay_lines(
             &overlay_values.deltas.decoder_output,
         ),
         timing_line(
-            "frame draw encoded",
+            "draw submitted",
             sample.frame_draw_encoded_timestamp_us,
             &overlay_values.deltas.frame_draw_encoded,
         ),
         timing_line(
-            "frame GPU complete",
+            "rendered",
             sample.frame_gpu_complete_timestamp_us,
             &overlay_values.deltas.frame_gpu_complete,
         ),
     ];
     lines.extend([
         timing_value_line("Exposure to Receive", &overlay_values.exp2recv_latency),
-        timing_value_line("Receive to GPU", &overlay_values.receive_to_gpu_complete_latency),
-        timing_value_line("e2e to GPU", &overlay_values.e2e_to_gpu_complete_latency),
+        timing_value_line("Receive to Rendered", &overlay_values.receive_to_gpu_complete_latency),
+        timing_value_line("Exposure to Rendered", &overlay_values.e2e_to_gpu_complete_latency),
     ]);
     lines
 }
@@ -705,11 +705,11 @@ mod tests {
                 "webrtc receive:        01:02:03:488    +32.4ms",
                 "decoder upload:        01:02:03:491     +3.1ms",
                 "decoder output:        01:02:03:511    +19.8ms",
-                "frame draw encoded:    01:02:03:512     +1.6ms",
-                "frame GPU complete:    01:02:03:513     +0.7ms",
+                "draw submitted:        01:02:03:512     +1.6ms",
+                "rendered:              01:02:03:513     +0.7ms",
                 "Exposure to Receive:                    32.4ms",
-                "Receive to GPU:                         25.2ms",
-                "e2e to GPU:                             57.6ms",
+                "Receive to Rendered:                    25.2ms",
+                "Exposure to Rendered:                   57.6ms",
             ]
         );
     }
@@ -730,11 +730,11 @@ mod tests {
                 "webrtc receive:        --:--:--:---    +--.-ms",
                 "decoder upload:        --:--:--:---    +--.-ms",
                 "decoder output:        --:--:--:---    +--.-ms",
-                "frame draw encoded:    --:--:--:---    +--.-ms",
-                "frame GPU complete:    --:--:--:---    +--.-ms",
+                "draw submitted:        --:--:--:---    +--.-ms",
+                "rendered:              --:--:--:---    +--.-ms",
                 "Exposure to Receive:                        NA",
-                "Receive to GPU:                             NA",
-                "e2e to GPU:                                 NA",
+                "Receive to Rendered:                        NA",
+                "Exposure to Rendered:                       NA",
             ]
         );
     }
@@ -835,11 +835,11 @@ mod tests {
         let lines = state.display_overlay_lines(now).expect("overlay should render");
         assert_eq!(lines[3], "decoder upload:        00:00:00:036     +3.1ms");
         assert_eq!(lines[4], "decoder output:        00:00:00:056    +19.8ms");
-        assert_eq!(lines[5], "frame draw encoded:    00:00:00:057     +1.6ms");
-        assert_eq!(lines[6], "frame GPU complete:    00:00:00:058     +0.7ms");
+        assert_eq!(lines[5], "draw submitted:        00:00:00:057     +1.6ms");
+        assert_eq!(lines[6], "rendered:              00:00:00:058     +0.7ms");
         assert_eq!(lines[7], "Exposure to Receive:                    32.4ms");
-        assert_eq!(lines[8], "Receive to GPU:                         25.2ms");
-        assert_eq!(lines[9], "e2e to GPU:                             57.6ms");
+        assert_eq!(lines[8], "Receive to Rendered:                    25.2ms");
+        assert_eq!(lines[9], "Exposure to Rendered:                   57.6ms");
 
         state.record_subscribe_event(subscribe_event(
             SubscribeTimingStage::WebrtcReceive,
@@ -864,21 +864,21 @@ mod tests {
             .expect("overlay should render");
         assert_eq!(lines[3], "decoder upload:        00:00:01:060     +3.1ms");
         assert_eq!(lines[4], "decoder output:        00:00:01:080    +19.8ms");
-        assert_eq!(lines[5], "frame draw encoded:    00:00:01:100     +1.6ms");
-        assert_eq!(lines[6], "frame GPU complete:    00:00:01:104     +0.7ms");
+        assert_eq!(lines[5], "draw submitted:        00:00:01:100     +1.6ms");
+        assert_eq!(lines[6], "rendered:              00:00:01:104     +0.7ms");
         assert_eq!(lines[7], "Exposure to Receive:                    32.4ms");
-        assert_eq!(lines[8], "Receive to GPU:                         25.2ms");
-        assert_eq!(lines[9], "e2e to GPU:                             57.6ms");
+        assert_eq!(lines[8], "Receive to Rendered:                    25.2ms");
+        assert_eq!(lines[9], "Exposure to Rendered:                   57.6ms");
 
         let lines = state
             .display_overlay_lines(now + Duration::from_millis(100))
             .expect("overlay should render");
         assert_eq!(lines[3], "decoder upload:        00:00:01:060    +10.0ms");
         assert_eq!(lines[4], "decoder output:        00:00:01:080    +20.0ms");
-        assert_eq!(lines[5], "frame draw encoded:    00:00:01:100    +20.0ms");
-        assert_eq!(lines[6], "frame GPU complete:    00:00:01:104     +4.0ms");
+        assert_eq!(lines[5], "draw submitted:        00:00:01:100    +20.0ms");
+        assert_eq!(lines[6], "rendered:              00:00:01:104     +4.0ms");
         assert_eq!(lines[7], "Exposure to Receive:                    50.0ms");
-        assert_eq!(lines[8], "Receive to GPU:                         54.0ms");
-        assert_eq!(lines[9], "e2e to GPU:                            104.0ms");
+        assert_eq!(lines[8], "Receive to Rendered:                    54.0ms");
+        assert_eq!(lines[9], "Exposure to Rendered:                  104.0ms");
     }
 }

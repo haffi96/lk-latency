@@ -30,6 +30,7 @@ use crate::headless;
 use crate::subscriber_timing;
 use crate::timing_csv;
 use crate::user_data;
+use crate::video_display;
 use crate::viewport_aspect;
 
 use codec_display::{codec_from_mime, codec_with_implementation};
@@ -413,7 +414,7 @@ struct Args {
     #[arg(long)]
     low_latency: bool,
 
-    /// Display detailed frame timing in the separate diagnostics window
+    /// Display detailed frame timing in the stats overlay
     #[arg(long)]
     display_timestamp: bool,
 
@@ -949,6 +950,8 @@ impl TimestampAnchor {
 /// Timing CSV and measurement window for the windowed viewer (headless has its own).
 struct WindowedTiming {
     csv: Option<timing_csv::TimingCsv>,
+    /// Track of the latest delivered frame, for render events that don't carry one.
+    sid: String,
     warmup: Duration,
     first_frame: Option<Instant>,
     measurement_wall_start: Option<u64>,
@@ -970,8 +973,23 @@ impl WindowedTiming {
             let measured = first.elapsed() >= timing.warmup;
             let metadata = frame.frame_metadata.as_ref();
             let capture = metadata.and_then(|m| m.user_timestamp).unwrap_or_default();
+            if timing.sid != sid {
+                timing.sid = sid.to_owned();
+            }
             if let Some(csv) = &mut timing.csv {
                 if let Err(error) = csv.record(sid, "FrameSink", now, capture, metadata.and_then(|m| m.frame_id), measured) {
+                    warn!("Timing CSV write failed: {error}");
+                }
+            }
+        });
+    }
+
+    /// Record the GPU finishing the frame's draw (the windowed viewer's render stage).
+    fn record_gpu_complete(capture: u64, frame_id: Option<u32>, now: u64) {
+        Self::with(|timing| {
+            let measured = timing.measurement_wall_start.is_some_and(|start| now >= start);
+            if let Some(csv) = &mut timing.csv {
+                if let Err(error) = csv.record(&timing.sid, "GpuComplete", now, capture, frame_id, measured) {
                     warn!("Timing CSV write failed: {error}");
                 }
             }
@@ -1515,43 +1533,21 @@ fn paint_simulcast_controls(ui: &mut egui::Ui, simulcast: &Arc<Mutex<SimulcastSt
     }
 }
 
-fn paint_subscriber_diagnostics(
+fn paint_subscriber_overlay(
     ui: &mut egui::Ui,
-    shared: &Arc<Mutex<SharedYuv>>,
+    text: &str,
     simulcast: &Arc<Mutex<SimulcastState>>,
-    include_timing: bool,
-    subscriber_timing: &SubscriberTimingHandle,
     channel_history: &VecDeque<[f32; user_data::NUM_CHANNELS]>,
 ) {
-    egui::Frame::NONE.inner_margin(egui::Margin::same(DIAGNOSTICS_CONTENT_PADDING)).show(
-        ui,
-        |ui| {
-            ui.visuals_mut().override_text_color = Some(egui::Color32::WHITE);
-            egui::ScrollArea::vertical().show(ui, |ui| {
-                let lines = subscriber_diagnostics_lines(
-                    shared,
-                    simulcast,
-                    include_timing,
-                    subscriber_timing,
-                );
-                ui.add(
-                    egui::Label::new(
-                        egui::RichText::new(lines.join("\n"))
-                            .monospace()
-                            .size(12.0)
-                            .color(egui::Color32::WHITE),
-                    )
-                    .extend(),
-                );
-
-                if !channel_history.is_empty() {
-                    ui.separator();
-                    paint_channel_graph(ui, channel_history);
-                }
-                paint_simulcast_controls(ui, simulcast);
-            });
-        },
-    );
+    video_display::overlay_frame().show(ui, |ui| {
+        ui.visuals_mut().override_text_color = Some(egui::Color32::WHITE);
+        ui.add(video_display::overlay_label(text));
+        if !channel_history.is_empty() {
+            ui.separator();
+            paint_channel_graph(ui, channel_history);
+        }
+        paint_simulcast_controls(ui, simulcast);
+    });
 }
 
 fn handle_track_unsubscribed(
@@ -1608,16 +1604,6 @@ fn handle_track_unpublished(
 
 /// Number of channel samples retained for the live graph (~10s at 30fps).
 const CHANNEL_HISTORY_LEN: usize = 300;
-/// Diagnostics are intentionally slower than video rendering so UI work cannot pace video frames.
-const DIAGNOSTICS_REPAINT_INTERVAL: Duration = Duration::from_millis(100);
-const DIAGNOSTICS_CONTENT_PADDING: i8 = 10;
-const DIAGNOSTICS_WINDOW_SIZE: [f32; 2] = [400.0, 272.0];
-const DIAGNOSTICS_WINDOW_MIN_SIZE: [f32; 2] = [320.0, 120.0];
-
-fn diagnostics_viewport_id() -> egui::ViewportId {
-    egui::ViewportId::from_hash_of("subscriber-diagnostics")
-}
-
 /// Distinct colors for the six channel traces.
 const CHANNEL_COLORS: [egui::Color32; user_data::NUM_CHANNELS] = [
     egui::Color32::from_rgb(0xef, 0x53, 0x50), // red
@@ -1640,63 +1626,29 @@ struct VideoApp {
     display_timestamp: bool,
     /// Rolling history of decoded channel values from the user_data trailer.
     channel_history: Arc<Mutex<VecDeque<[f32; user_data::NUM_CHANNELS]>>>,
-    diagnostics_open: Arc<AtomicBool>,
-    diagnostics_started: Arc<AtomicBool>,
+    overlay_text: video_display::CachedOverlayText,
+    overlay_visible: bool,
 }
 
 impl VideoApp {
-    fn show_diagnostics_window(&self, ctx: &egui::Context) {
-        if !self.diagnostics_open.load(Ordering::Acquire) {
+    /// Stats drawn over the video, in the same window. The text refreshes at 10 Hz
+    /// (see `CachedOverlayText`), so it adds no layout work to most video frames.
+    fn show_overlay(&mut self, ctx: &egui::Context) {
+        video_display::handle_overlay_toggle(ctx, &mut self.overlay_visible);
+        if !self.overlay_visible {
             return;
         }
-
-        let shared = self.shared.clone();
-        let simulcast = self.simulcast.clone();
-        let subscriber_timing = self.subscriber_timing.clone();
-        let channel_history = self.channel_history.clone();
-        let diagnostics_open = self.diagnostics_open.clone();
-        let diagnostics_started = self.diagnostics_started.clone();
+        let (shared, simulcast, timing) = (&self.shared, &self.simulcast, &self.subscriber_timing);
         let include_timing = self.display_timestamp;
-
-        ctx.show_viewport_deferred(
-            diagnostics_viewport_id(),
-            egui::ViewportBuilder::default()
-                .with_title("LiveKit Subscriber Diagnostics")
-                .with_inner_size(DIAGNOSTICS_WINDOW_SIZE)
-                .with_min_inner_size(DIAGNOSTICS_WINDOW_MIN_SIZE),
-            move |ui, viewport_class| {
-                if !diagnostics_started.swap(true, Ordering::AcqRel) {
-                    let viewport_class = match viewport_class {
-                        egui::ViewportClass::Root => "root",
-                        egui::ViewportClass::Deferred => "deferred",
-                        egui::ViewportClass::Immediate => "immediate",
-                        egui::ViewportClass::EmbeddedWindow => "embedded",
-                    };
-                    info!(
-                        "Subscriber diagnostics window active: {}, refresh={}ms",
-                        viewport_class,
-                        DIAGNOSTICS_REPAINT_INTERVAL.as_millis()
-                    );
-                }
-                if ui.input(|input| input.viewport().close_requested()) {
-                    diagnostics_open.store(false, Ordering::Release);
-                    info!("Subscriber diagnostics window closed; video rendering remains active");
-                    ui.ctx().request_repaint_of(egui::ViewportId::ROOT);
-                    return;
-                }
-
-                let channel_history = channel_history.lock().clone();
-                paint_subscriber_diagnostics(
-                    ui,
-                    &shared,
-                    &simulcast,
-                    include_timing,
-                    &subscriber_timing,
-                    &channel_history,
-                );
-                ui.ctx().request_repaint_after(DIAGNOSTICS_REPAINT_INTERVAL);
-            },
-        );
+        let text = self.overlay_text.get(Instant::now(), || {
+            Some(subscriber_diagnostics_lines(shared, simulcast, include_timing, timing).join("\n"))
+        });
+        let channel_history = self.channel_history.lock().clone();
+        egui::Area::new("subscriber_overlay".into())
+            .anchor(egui::Align2::LEFT_TOP, egui::vec2(10.0, 10.0))
+            .show(ctx, |ui| paint_subscriber_overlay(ui, text, simulcast, &channel_history));
+        // Keep the text current while no video frames are arriving.
+        ctx.request_repaint_after(Duration::from_millis(100));
     }
 }
 
@@ -1748,7 +1700,7 @@ impl eframe::App for VideoApp {
                 },
             );
         });
-        self.show_diagnostics_window(&ctx);
+        self.show_overlay(&ctx);
     }
 }
 
@@ -1883,6 +1835,7 @@ async fn run(args: Args, ctrl_c_received: Arc<AtomicBool>) -> Result<()> {
     let csv = args.timing_output.as_deref().map(timing_csv::TimingCsv::create).transpose()?;
     let _ = WINDOWED_TIMING.set(Mutex::new(WindowedTiming {
         csv,
+        sid: String::new(),
         warmup: Duration::from_secs(args.warmup),
         first_frame: None,
         measurement_wall_start: None,
@@ -2000,12 +1953,12 @@ async fn run(args: Args, ctrl_c_received: Arc<AtomicBool>) -> Result<()> {
         viewport,
         display_timestamp: args.display_timestamp,
         channel_history,
-        diagnostics_open: Arc::new(AtomicBool::new(true)),
-        diagnostics_started: Arc::new(AtomicBool::new(false)),
+        overlay_text: video_display::CachedOverlayText::default(),
+        overlay_visible: true,
     };
     let native_options = viewport_aspect::native_options(None);
     eframe::run_native(
-        "LiveKit Video Subscriber",
+        &format!("LiveKit Video Subscriber{}", video_display::OVERLAY_TITLE_HINT),
         native_options,
         Box::new(|_| Ok::<Box<dyn eframe::App>, _>(Box::new(app))),
     )?;
@@ -2601,9 +2554,11 @@ impl CallbackTrait for YuvPaintCallback {
             );
             let completion_probe = state.gpu_completion_poller.begin_probe();
             let subscriber_timing = self.subscriber_timing.clone();
+            let (capture_timestamp_us, frame_id) = (sample.capture_timestamp_us, sample.frame_id);
             render_pass.on_submitted_work_done(move || {
-                subscriber_timing
-                    .record_frame_gpu_complete(completion_token, current_timestamp_us());
+                let now = current_timestamp_us();
+                subscriber_timing.record_frame_gpu_complete(completion_token, now);
+                WindowedTiming::record_gpu_complete(capture_timestamp_us, frame_id, now);
                 drop(completion_probe);
             });
         }

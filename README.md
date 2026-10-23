@@ -168,6 +168,10 @@ were never delivered as decoded frames.
   still recorded, and the summary adds render time. Native only. The windows open
   side by side; with `--burn-timestamp`, a screenshot of both shows how far the
   viewer is behind (accurate to about one frame; average several screenshots).
+  On a Linux box with a dummy display and remote desktop (seen with NVIDIA, X11 and
+  RustDesk), the viewer can stop receiving frames when both windows are open. The
+  viewer then exits 5 s after the run ends and the iteration is reported as failed.
+  Headless runs are unaffected.
 - **Network:**
   - `--firewall-profile` (Docker with `--cap-add NET_ADMIN`; default `open`)
     restricts the container's egress. The `static-*` profiles allow only LiveKit

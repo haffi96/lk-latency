@@ -27,6 +27,10 @@ pub(crate) struct SharedYuv {
     pub(crate) fps: f32,
     pub(crate) simulcast: bool,
     pub(crate) dirty: bool,
+    /// Frame ID of the packed frame waiting for upload (valid while `dirty`).
+    pub(crate) frame_id: Option<u32>,
+    /// Frame ID of the frame currently on screen.
+    pub(crate) shown_frame_id: Option<u32>,
     repaint_ctx: Option<egui::Context>,
     pub(crate) timing_sample: Option<PublisherTimingSample>,
 }
@@ -111,6 +115,7 @@ pub(crate) fn pack_i420_into_shared(
     u_stride: u32,
     v: &[u8],
     v_stride: u32,
+    frame_id: Option<u32>,
     timing_sample: Option<PublisherTimingSample>,
 ) -> bool {
     let uv_w = (width + 1) / 2;
@@ -132,6 +137,7 @@ pub(crate) fn pack_i420_into_shared(
         s.height = height;
         s.y_bytes_per_row = y_bytes_per_row;
         s.uv_bytes_per_row = uv_bytes_per_row;
+        s.frame_id = frame_id;
         if let Some(timing_sample) = timing_sample {
             s.timing_sample = Some(timing_sample);
         }
@@ -224,9 +230,16 @@ fn publisher_timing_line(label: &str, timestamp_us: Option<u64>, delta: &str) ->
     }
 }
 
+/// Updated every paint (unlike the 10 Hz timing block) and always the frame on screen,
+/// matching the ID burned into the video.
+fn shown_frame_line(frame_id: Option<u32>) -> String {
+    let frame_id = frame_id.map(|id| id.to_string()).unwrap_or_else(|| "NA".to_string());
+    publisher_timing_value_line("showing frame", &frame_id)
+}
+
 fn publisher_timing_frame_id_line(frame_id: Option<u32>) -> String {
     let frame_id = frame_id.map(|id| id.to_string()).unwrap_or_else(|| "NA".to_string());
-    publisher_timing_value_line("frame ID", &frame_id)
+    publisher_timing_value_line("timing for frame", &frame_id)
 }
 
 fn build_publisher_timing_lines(
@@ -473,9 +486,9 @@ mod tests {
         let second_u = [14];
         let second_v = [15];
 
-        assert!(pack_i420_into_shared(&shared, 2, 2, &first_y, 2, &first_u, 1, &first_v, 1, None,));
+        assert!(pack_i420_into_shared(&shared, 2, 2, &first_y, 2, &first_u, 1, &first_v, 1, None, None,));
         assert!(!pack_i420_into_shared(
-            &shared, 2, 2, &second_y, 2, &second_u, 1, &second_v, 1, None,
+            &shared, 2, 2, &second_y, 2, &second_u, 1, &second_v, 1, None, None,
         ));
 
         let s = shared.lock();
@@ -504,7 +517,7 @@ mod tests {
         assert_eq!(
             lines,
             vec![
-                "frame ID:                               7",
+                "timing for frame:                       7",
                 "sensor exposure:  01:02:03:456      0.0ms",
                 "got frame buffer: 01:02:03:488    +32.4ms",
                 "encoder upload:   01:02:03:491     +3.1ms",
@@ -527,7 +540,7 @@ mod tests {
         assert_eq!(
             lines,
             vec![
-                "frame ID:                              NA",
+                "timing for frame:                      NA",
                 "sensor exposure:  01:02:03:456      0.0ms",
                 "got frame buffer: 01:02:03:488    +32.4ms",
                 "encoder upload:   --:--:--:---    +--.-ms",
@@ -726,6 +739,14 @@ impl eframe::App for VideoApp {
 
         let channel_values = self.channels.as_ref().map(|targets| drive_channels(&ctx, targets));
 
+        let upload = {
+            let mut shared = self.shared.lock();
+            if shared.dirty {
+                shared.shown_frame_id = shared.frame_id;
+            }
+            shared.dirty
+        };
+
         egui::CentralPanel::default().frame(egui::Frame::NONE).show(root_ui, |ui| {
             ui.ctx().request_repaint();
 
@@ -738,7 +759,7 @@ impl eframe::App for VideoApp {
                     let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
                     let cb = egui_wgpu_backend::Callback::new_paint_callback(
                         rect,
-                        YuvPaintCallback { shared: self.shared.clone() },
+                        YuvPaintCallback { shared: self.shared.clone(), upload },
                     );
                     ui.painter().add(cb);
                 },
@@ -753,6 +774,7 @@ impl eframe::App for VideoApp {
                 publisher_overlay_lines(shared, timing_overlay_state, now).map(|lines| lines.join("\n"))
             });
             if !text.is_empty() {
+                let shown = shown_frame_line(self.shared.lock().shown_frame_id);
                 let has_timing = text.contains('\n');
                 egui::Area::new("publisher_overlay".into())
                     .anchor(egui::Align2::LEFT_TOP, egui::vec2(10.0, 10.0))
@@ -762,6 +784,8 @@ impl eframe::App for VideoApp {
                             if has_timing {
                                 ui.set_min_width(PUBLISHER_TIMING_LINE_WIDTH as f32 * 8.0);
                             }
+                            ui.spacing_mut().item_spacing.y = 0.0;
+                            ui.add(overlay_label(&shown));
                             ui.add(overlay_label(text));
                         });
                     });
@@ -836,6 +860,9 @@ pub(crate) fn run_display(
 
 struct YuvPaintCallback {
     shared: Arc<Mutex<SharedYuv>>,
+    /// Set by `ui()` when it labelled the waiting frame as shown; only then is it
+    /// uploaded, so a frame packed after `ui()` waits for the next paint.
+    upload: bool,
 }
 
 struct YuvGpuState {
@@ -1109,7 +1136,7 @@ impl CallbackTrait for YuvPaintCallback {
 
         let dims = (shared.width, shared.height);
         let upload_row_bytes = (shared.y_bytes_per_row, shared.uv_bytes_per_row);
-        let has_dirty_frame = if shared.dirty {
+        let has_dirty_frame = if self.upload && shared.dirty {
             std::mem::swap(&mut state.upload_y, &mut shared.y);
             std::mem::swap(&mut state.upload_u, &mut shared.u);
             std::mem::swap(&mut state.upload_v, &mut shared.v);

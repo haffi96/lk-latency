@@ -1535,12 +1535,15 @@ fn paint_simulcast_controls(ui: &mut egui::Ui, simulcast: &Arc<Mutex<SimulcastSt
 
 fn paint_subscriber_overlay(
     ui: &mut egui::Ui,
+    shown_frame: &str,
     text: &str,
     simulcast: &Arc<Mutex<SimulcastState>>,
     channel_history: &VecDeque<[f32; user_data::NUM_CHANNELS]>,
 ) {
     video_display::overlay_frame().show(ui, |ui| {
         ui.visuals_mut().override_text_color = Some(egui::Color32::WHITE);
+        ui.spacing_mut().item_spacing.y = 0.0;
+        ui.add(video_display::overlay_label(shown_frame));
         ui.add(video_display::overlay_label(text));
         if !channel_history.is_empty() {
             ui.separator();
@@ -1628,6 +1631,8 @@ struct VideoApp {
     channel_history: Arc<Mutex<VecDeque<[f32; user_data::NUM_CHANNELS]>>>,
     overlay_text: video_display::CachedOverlayText,
     overlay_visible: bool,
+    /// Frame ID of the frame on screen (the last one handed to the paint callback).
+    shown_frame_id: Option<u32>,
 }
 
 impl VideoApp {
@@ -1643,10 +1648,11 @@ impl VideoApp {
         let text = self.overlay_text.get(Instant::now(), || {
             Some(subscriber_diagnostics_lines(shared, simulcast, include_timing, timing).join("\n"))
         });
+        let shown = subscriber_timing::shown_frame_line(self.shown_frame_id);
         let channel_history = self.channel_history.lock().clone();
         egui::Area::new("subscriber_overlay".into())
             .anchor(egui::Align2::LEFT_TOP, egui::vec2(10.0, 10.0))
-            .show(ctx, |ui| paint_subscriber_overlay(ui, text, simulcast, &channel_history));
+            .show(ctx, |ui| paint_subscriber_overlay(ui, &shown, text, simulcast, &channel_history));
         // Keep the text current while no video frames are arriving.
         ctx.request_repaint_after(Duration::from_millis(100));
     }
@@ -1667,6 +1673,7 @@ impl eframe::App for VideoApp {
 
         let render_frame = self.frame_slot.take();
         if let Some(frame) = render_frame.as_ref() {
+            self.shown_frame_id = frame.frame_metadata.as_ref().and_then(|metadata| metadata.frame_id);
             if let Some(metadata) = &frame.frame_metadata {
                 if let Some(capture_timestamp_us) = metadata.user_timestamp {
                     self.subscriber_timing.record_frame_selected_for_render(
@@ -1955,6 +1962,7 @@ async fn run(args: Args, ctrl_c_received: Arc<AtomicBool>) -> Result<()> {
         channel_history,
         overlay_text: video_display::CachedOverlayText::default(),
         overlay_visible: true,
+        shown_frame_id: None,
     };
     let native_options = viewport_aspect::native_options(None);
     eframe::run_native(

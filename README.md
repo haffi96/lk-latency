@@ -85,6 +85,10 @@ livekit-server --dev &
 
 From Docker, use `--url ws://host.docker.internal:7880`.
 
+On Linux, if the viewer reports `No video frames received`, start the server with
+your LAN address: `livekit-server --dev --node-ip <LAN IP>`. Media then uses that
+address. libwebrtc ignores loopback candidates, so `--node-ip 127.0.0.1` never connects.
+
 ## Measure
 
 ```sh

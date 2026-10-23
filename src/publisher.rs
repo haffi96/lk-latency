@@ -1752,6 +1752,7 @@ async fn run_capture_loop(
                 data_v,
                 stride_v as u32,
                 fid,
+                capture_wall_time_us,
                 timing_sample,
             );
         }

@@ -117,17 +117,58 @@ lk-latency view --room exp1 --region us --duration 30      # another terminal / 
 lk-latency summarize results/exp1                          # after stopping the publisher
 ```
 
+To restrict only the publisher's network, run it in Docker under a firewall profile and run the
+viewers natively on the same host, so they share a clock. The container writes as root, so
+create the room directory first and make it writable for the viewers:
+
+```sh
+mkdir -p results/exp1 && chmod 777 results/exp1
+docker run --rm --cap-add NET_ADMIN --env-file ~/.config/lk-latency/cloud.env -v "$PWD/results:/results" \
+  $IMG publish --room exp1 --region uae --firewall-profile static-tls --duration 60
+lk-latency view --room exp1 --region uae --duration 30     # unrestricted; another terminal
+lk-latency summarize results/exp1
+```
+
+Each process's own profile is recorded in its `.json` file in the room directory, so
+`summarize` checks the publisher's path against its profile and the viewers' paths against
+theirs.
+
 ### Endpoints
 
 `--publisher-region`, `--viewer-region` (repeatable), and `--region` each
 accept one of:
 
-- a region slug: `eu`, `us`, `india`, `japan`, `canada`, `uae`, …, which maps to
-  `<project>.<slug>.rtc.livekit.cloud` (`uae` maps to the Dubai cluster);
-- `default`: the `--url` / `LIVEKIT_URL` endpoint unchanged;
-- a full `wss://` URL.
+- a region slug from the table below;
+- `default`: the `--url` / `LIVEKIT_URL` endpoint unchanged, which LiveKit routes to
+  the cluster nearest the client;
+- a full `wss://` URL, for anything not in the table.
 
-For known slugs the server-reported region is verified, and a mismatch fails the run.
+| slug (aliases) | location | static IPs |
+|---|---|---|
+| `us` | US | yes |
+| `eu` | France, Germany | yes |
+| `canada` (`ca`) | Canada | yes |
+| `india` | India | yes |
+| `japan` | Japan | yes |
+| `uk` | London | no |
+| `aus` (`australia`) | Sydney | no |
+| `saudiarabia` (`sa`) | Jeddah | no |
+| `uae` (`dubai`) | Dubai | no |
+| `israel` (`il`) | Jerusalem | no |
+| `singapore` | Singapore | no |
+| `brazil` | São Paulo | no |
+| `mexico` | Querétaro | no |
+| `southafrica` (`africa`) | Johannesburg | no |
+| `zurich` (`switzerland`) | Zurich | no |
+
+The first five map to `<project>.<slug>.rtc.livekit.cloud`. LiveKit has no `.rtc` name for
+most of the others, so those slugs are pinned to one zone host from the
+[firewall list](https://docs.livekit.io/deploy/admin/firewall/) (for example,
+`uae` is `<project>.odubai1a.production.livekit.cloud`). Each run checks the region the
+server reports, and a mismatch fails the run. Unknown slugs are rejected: LiveKit's DNS
+resolves any unknown name to the nearest cluster, so a typo would otherwise measure the
+wrong region. Region groups such as `me` (Saudi Arabia + UAE) are not slugs; pick one
+region.
 
 ### Stages
 
@@ -174,9 +215,20 @@ were never delivered as decoded frames.
   Headless runs are unaffected.
 - **Network:**
   - `--firewall-profile` (Docker with `--cap-add NET_ADMIN`; default `open`)
-    restricts the container's egress. The `static-*` profiles allow only LiveKit
-    Cloud's static CIDRs; `outbound-turn-udp` allows only UDP 3478 plus
-    signaling.
+    restricts the container's egress. Every profile allows TCP/443 to the signaling
+    hosts' addresses, resolved once at startup and logged per endpoint (LiveKit's
+    firewall rule for signaling is by hostname). The `static-*` profiles also allow
+    LiveKit Cloud's static CIDRs (`cloud-static-ips.txt`): TCP/443 for TURN/TLS, plus
+    the profile's ICE/TURN ports. `outbound-turn-udp` allows only UDP 3478 to any
+    address, plus signaling.
+    Every profile also allows DNS (port 53) to the nameservers in the container's
+    `/etc/resolv.conf`.
+  - Static IPs matter only for direct ICE and TURN/UDP, which go to the media server
+    itself. LiveKit publishes them for `us`, `eu`, `canada`, `india` and `japan`. In
+    other regions those paths are blocked under `static-*`, and media relays over
+    TURN/TLS on TCP/443 through `<project>.turn.livekit.cloud`. That host resolves to
+    the client's nearest cluster, so this works when that cluster is in a static
+    region.
   - `--relay-only` requires TURN relay candidates.
   - `--data-probe` also measures data-channel round trips.
 

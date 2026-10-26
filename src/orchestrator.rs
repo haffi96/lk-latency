@@ -27,16 +27,45 @@ use std::{
 const DEFAULT_RUST_LOG: &str = "warn,lk_latency=info";
 const STATIC_CIDRS: &str = include_str!("../cloud-static-ips.txt");
 
-/// Regions whose endpoint does not follow `<project>.<region>.rtc.livekit.cloud`.
-const REGION_HOSTS: &[(&str, &str)] = &[("uae", "{project}.odubai1a.production.livekit.cloud")];
-/// Server-reported region names accepted for each requested region slug.
-const REGION_ALIASES: &[(&str, &[&str])] = &[
-    ("uae", &["uae", "dubai"]),
-    ("eu", &["eu", "europe", "france", "germany"]),
-    ("us", &["us", "united states"]),
-    ("canada", &["canada"]),
-    ("india", &["india"]),
-    ("japan", &["japan"]),
+/// A LiveKit Cloud realtime region reachable by slug.
+struct Region {
+    /// Accepted slugs; the first is the canonical name used in results.
+    slugs: &'static [&'static str],
+    /// Signaling host. Unknown names under livekit.cloud resolve to the nearest cluster, so
+    /// each region needs a host that exists. Regions without a `<region>.rtc` name are pinned
+    /// to one zone from https://docs.livekit.io/deploy/admin/firewall/.
+    host: &'static str,
+    /// Server-reported region names accepted for this region.
+    server: &'static [&'static str],
+    /// Media servers inside `cloud-static-ips.txt`, so direct ICE passes the static-* profiles.
+    static_ips: bool,
+}
+
+const fn region(
+    slugs: &'static [&'static str],
+    host: &'static str,
+    server: &'static [&'static str],
+    static_ips: bool,
+) -> Region {
+    Region { slugs, host, server, static_ips }
+}
+
+const REGIONS: &[Region] = &[
+    region(&["us"], "{project}.us.rtc.livekit.cloud", &["us", "united states"], true),
+    region(&["eu"], "{project}.eu.rtc.livekit.cloud", &["eu", "europe", "france", "germany"], true),
+    region(&["canada", "ca"], "{project}.canada.rtc.livekit.cloud", &["canada"], true),
+    region(&["india"], "{project}.india.rtc.livekit.cloud", &["india"], true),
+    region(&["japan"], "{project}.japan.rtc.livekit.cloud", &["japan"], true),
+    region(&["uk"], "{project}.uk.rtc.livekit.cloud", &["uk"], false),
+    region(&["aus", "australia"], "{project}.aus.rtc.livekit.cloud", &["australia"], false),
+    region(&["saudiarabia", "sa"], "{project}.sa.rtc.livekit.cloud", &["saudi arabia"], false),
+    region(&["uae", "dubai"], "{project}.odubai1a.production.livekit.cloud", &["uae", "dubai"], false),
+    region(&["israel", "il"], "{project}.ojerusalem1a.production.livekit.cloud", &["israel"], false),
+    region(&["singapore"], "{project}.osingapore1a.production.livekit.cloud", &["singapore"], false),
+    region(&["brazil"], "{project}.osaopaulo1b.production.livekit.cloud", &["brazil"], false),
+    region(&["mexico"], "{project}.oqueretaro1a.production.livekit.cloud", &["mexico"], false),
+    region(&["southafrica", "africa"], "{project}.ojohannesburg1a.production.livekit.cloud", &["south africa"], false),
+    region(&["zurich", "switzerland"], "{project}.ozurich1a.production.livekit.cloud", &["zurich", "switzerland"], false),
 ];
 
 const PUBLISHER_STAGES: &[&str] = &["EncoderUpload", "EncoderOutput", "WebrtcPacketize"];
@@ -88,7 +117,7 @@ enum Mode {
 
 #[derive(Args, Clone)]
 struct RunArgs {
-    /// Region slug (eu, us, india, japan, canada, uae, ...), `default`, or a wss:// URL
+    /// Region slug (eu, us, uae, saudiarabia, singapore, ... see README), `default`, or a wss:// URL
     #[arg(long, default_value = "default")]
     publisher_region: String,
     /// Viewer endpoint (same forms as --publisher-region); repeat for simultaneous viewers
@@ -355,9 +384,10 @@ fn resolve_endpoint(spec: &str, base_url: &str) -> Result<String> {
         }
         return Ok(spec.to_owned());
     }
-    if !spec.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-') {
-        bail!("Invalid region slug: {spec:?}");
-    }
+    let region = find_region(spec).ok_or_else(|| {
+        let known: Vec<&str> = REGIONS.iter().map(|r| r.slugs[0]).collect();
+        anyhow!("Unknown region {spec:?}; known regions: {}. Pass a full wss:// URL for others", known.join(", "))
+    })?;
     let host = base_url
         .strip_prefix("wss://")
         .map(|rest| rest.split(['/', '?']).next().unwrap_or(rest))
@@ -366,12 +396,18 @@ fn resolve_endpoint(spec: &str, base_url: &str) -> Result<String> {
             anyhow!("Region slugs need a LiveKit Cloud LIVEKIT_URL (wss://<project>.livekit.cloud); pass a full wss:// URL instead")
         })?;
     let project = host.split('.').next().unwrap_or_default();
-    let template = REGION_HOSTS
-        .iter()
-        .find(|(name, _)| *name == spec)
-        .map(|(_, t)| *t)
-        .unwrap_or("{project}.{region}.rtc.livekit.cloud");
-    Ok(format!("wss://{}", template.replace("{project}", project).replace("{region}", spec)))
+    Ok(format!("wss://{}", region.host.replace("{project}", project)))
+}
+
+fn find_region(slug: &str) -> Option<&'static Region> {
+    REGIONS.iter().find(|r| r.slugs.contains(&slug))
+}
+
+/// The known region whose host this URL uses, for any project.
+fn region_for_url(url: &str) -> Option<&'static Region> {
+    let host = hostname(url)?;
+    let project = host.split('.').next()?;
+    REGIONS.iter().find(|r| r.host.replace("{project}", project) == host)
 }
 
 /// A label safe to share: never includes the project hostname.
@@ -384,13 +420,13 @@ fn describe_endpoint(spec: &str) -> String {
 }
 
 fn expected_region(spec: &str) -> Option<String> {
-    REGION_ALIASES.iter().any(|(name, _)| *name == spec).then(|| spec.to_owned())
+    find_region(spec).map(|r| r.slugs[0].to_owned())
 }
 
 fn region_matches(actual: &str, expected: &str) -> bool {
     let actual = actual.trim().to_lowercase();
-    let aliases = REGION_ALIASES.iter().find(|(name, _)| *name == expected).map(|(_, a)| a.to_vec());
-    aliases.unwrap_or_else(|| vec![expected]).iter().any(|name| {
+    let names = find_region(expected).map_or(&[][..], |r| r.server);
+    names.iter().any(|name| {
         actual == *name || actual.starts_with(&format!("{name} ")) || actual.starts_with(&format!("{name}-"))
     })
 }
@@ -420,6 +456,17 @@ fn resolve_ipv4<'a>(urls: impl IntoIterator<Item = &'a String>) -> Vec<String> {
     addresses.into_iter().collect()
 }
 
+fn nameservers() -> Vec<IpAddr> {
+    let config = fs::read_to_string("/etc/resolv.conf").unwrap_or_default();
+    let resolvers: BTreeSet<IpAddr> = config
+        .lines()
+        .filter_map(|line| line.trim().strip_prefix("nameserver"))
+        .filter_map(|address| address.trim().split('%').next()?.parse().ok())
+        .filter(|address: &IpAddr| !address.is_loopback())
+        .collect();
+    resolvers.into_iter().collect()
+}
+
 fn apply_firewall(profile: Firewall, signaling: &[String], out: &Path) -> Result<()> {
     if profile == Firewall::Open {
         return Ok(());
@@ -443,6 +490,15 @@ fn apply_firewall(profile: Firewall, signaling: &[String], out: &Path) -> Result
         rule(command, &["-P", "OUTPUT", "DROP"])?;
         rule(command, &["-A", "OUTPUT", "-o", "lo", "-j", "ACCEPT"])?;
         rule(command, &["-A", "OUTPUT", "-m", "conntrack", "--ctstate", "ESTABLISHED,RELATED", "-j", "ACCEPT"])?;
+    }
+    // The SDK resolves signaling and TURN hostnames after the rules apply.
+    let resolvers = nameservers();
+    for resolver in &resolvers {
+        let command = if resolver.is_ipv4() { "iptables" } else { "ip6tables" };
+        let destination = resolver.to_string();
+        for proto in ["udp", "tcp"] {
+            rule(command, &["-A", "OUTPUT", "-d", &destination, "-p", proto, "--dport", "53", "-j", "ACCEPT"])?;
+        }
     }
     if profile == Firewall::OutboundTurnUdp {
         // Destination port only: no new inbound UDP is permitted.
@@ -474,7 +530,7 @@ fn apply_firewall(profile: Firewall, signaling: &[String], out: &Path) -> Result
     log(format!("Container firewall profile: {}", value_name(profile)));
     write_json(
         &out.join("firewall.json"),
-        &json!({"profile": value_name(profile), "signaling_ipv4_tcp443": signaling,
+        &json!({"profile": value_name(profile), "signaling_ipv4_tcp443": signaling, "dns_resolvers": resolvers,
                 "static_cidrs": if is_static { static_cidrs() } else { vec![] }}),
     )
 }
@@ -495,20 +551,22 @@ fn probe_signaling(urls: &BTreeMap<String, String>, out: &Path) -> Result<()> {
     let mut probes = vec![];
     let mut blocked = vec![];
     for (name, url) in urls {
+        let addresses = resolve_ipv4([url]);
         let mut reachable = false;
-        for address in resolve_ipv4([url]) {
+        for address in &addresses {
             let ip: IpAddr = address.parse()?;
             let ok = TcpStream::connect_timeout(&(ip, 443).into(), Duration::from_secs(3)).is_ok();
             reachable |= ok;
-            probes.push(json!({"client": name, "address": address, "tcp443_reachable": ok}));
+            probes.push(json!({"client": name, "host": shareable_host(url), "address": address, "tcp443_reachable": ok}));
         }
         if !reachable {
-            blocked.push(name.clone());
+            let tried = if addresses.is_empty() { "no IPv4 address resolved".into() } else { addresses.join(", ") };
+            blocked.push(format!("{name} wss://{} ({tried})", shareable_host(url)));
         }
     }
     write_json(&out.join("endpoint-probes.json"), &json!(probes))?;
     if !blocked.is_empty() {
-        bail!("Signaling TCP/443 is blocked for {blocked:?}; add --signaling-ip exceptions");
+        bail!("Signaling TCP/443 unreachable for {}; add --signaling-ip exceptions if DNS changed", blocked.join("; "));
     }
     Ok(())
 }
@@ -534,6 +592,30 @@ fn inbound_udp_check(seconds: u64, out: &Path) -> Result<()> {
     Ok(())
 }
 
+/// The URL's host with the project label masked, safe for shared logs.
+fn shareable_host(url: &str) -> String {
+    let host = hostname(url).unwrap_or("?");
+    match host.split_once('.') {
+        Some((_, rest)) if host.ends_with(".livekit.cloud") => format!("<project>.{rest}"),
+        _ => host.to_owned(),
+    }
+}
+
+/// Log each endpoint's signaling addresses and what the profile leaves open for its media.
+fn log_endpoints(profile: Firewall, urls: &BTreeMap<String, String>, signaling: &BTreeMap<String, Vec<String>>) {
+    let is_static = !matches!(profile, Firewall::Open | Firewall::OutboundTurnUdp);
+    for (name, url) in urls {
+        let addresses = signaling.get(name).filter(|a| !a.is_empty()).map_or("no IPv4".into(), |a| a.join(", "));
+        let note = match region_for_url(url) {
+            _ if !is_static => "",
+            Some(region) if region.static_ips => "",
+            Some(_) => "; no static IPs, so direct ICE and TURN/UDP are blocked and media needs TURN/TLS on TCP/443",
+            None => "; not a regional endpoint, so direct ICE may reach a cluster outside the static ranges",
+        };
+        log(format!("{name}: wss://{} -> {addresses}{note}", shareable_host(url)));
+    }
+}
+
 fn prepare_network(common: &CommonArgs, out: &Path, urls: &BTreeMap<String, String>) -> Result<()> {
     if common.firewall_profile == Firewall::Open {
         if common.inbound_udp_check > 0 {
@@ -541,11 +623,14 @@ fn prepare_network(common: &CommonArgs, out: &Path, urls: &BTreeMap<String, Stri
         }
         return Ok(());
     }
+    // Per-run DNS snapshot of the signaling hosts, resolved before DROP applies. Signaling
+    // is allowed by hostname (`*.livekit.cloud`, TCP/443), and regions without static IPs
+    // have signaling hosts outside the static ranges.
+    let resolved: BTreeMap<String, Vec<String>> =
+        urls.iter().map(|(name, url)| (name.clone(), resolve_ipv4([url]))).collect();
+    log_endpoints(common.firewall_profile, urls, &resolved);
     let mut signaling: BTreeSet<String> = common.signaling_ips.iter().map(|ip| ip.to_string()).collect();
-    if common.firewall_profile == Firewall::OutboundTurnUdp {
-        // Per-run DNS snapshot of the signaling hosts, resolved before DROP applies.
-        signaling.extend(resolve_ipv4(urls.values()));
-    }
+    signaling.extend(resolved.values().flatten().cloned());
     apply_firewall(common.firewall_profile, &signaling.into_iter().collect::<Vec<_>>(), out)?;
     probe_signaling(urls, out)?;
     if common.inbound_udp_check > 0 {
@@ -796,6 +881,9 @@ struct Meta {
     exit_code: Option<i32>,
     duration: Option<u64>,
     data_probe: bool,
+    /// This process's own profile; `publish` and `view` may run under different ones.
+    #[serde(default)]
+    firewall_profile: Option<String>,
 }
 
 fn write_json(path: &Path, value: &impl Serialize) -> Result<()> {
@@ -899,7 +987,7 @@ fn mode_run(args: RunArgs) -> Result<i32> {
             write_json(&session.join(format!("{name}.json")), &Meta {
                 role: "viewer".into(), label: describe_endpoint(&spec), endpoint: Some(describe_endpoint(&spec)),
                 expected_region: expected_region(&spec), exit_code: Some(code), duration: Some(args.viewer.duration),
-                data_probe: args.common.data_probe,
+                data_probe: args.common.data_probe, firewall_profile: Some(value_name(args.common.firewall_profile)),
             })?;
         }
         let code = publisher.stop();
@@ -907,7 +995,7 @@ fn mode_run(args: RunArgs) -> Result<i32> {
             role: "publisher".into(), label: "publisher".into(), endpoint: Some(describe_endpoint(&args.publisher_region)),
             expected_region: expected_region(&args.publisher_region),
             exit_code: Some(if published { code } else { code.max(1) }), duration: Some(args.viewer.duration),
-            data_probe: args.common.data_probe,
+            data_probe: args.common.data_probe, firewall_profile: Some(value_name(args.common.firewall_profile)),
         })?;
         sessions.push(session);
         if iteration < args.iterations && !STOP.load(Ordering::SeqCst) {
@@ -973,7 +1061,7 @@ fn mode_publish(args: PublishArgs) -> Result<i32> {
     write_json(&out.join("publisher.json"), &Meta {
         role: "publisher".into(), label: "publisher".into(), endpoint: Some(describe_endpoint(&args.region)),
         expected_region: expected_region(&args.region), exit_code: Some(code), duration: None,
-        data_probe: args.common.data_probe,
+        data_probe: args.common.data_probe, firewall_profile: Some(value_name(args.common.firewall_profile)),
     })?;
     save_firewall_counters(args.common.firewall_profile, &out);
     log(format!("Publisher stopped. After viewers finish: lk-latency summarize {}", out.display()));
@@ -1004,7 +1092,7 @@ fn mode_view(args: ViewArgs) -> Result<i32> {
     write_json(&out.join(format!("{name}.json")), &Meta {
         role: "viewer".into(), label: name.clone(), endpoint: Some(describe_endpoint(&args.region)),
         expected_region: expected_region(&args.region), exit_code: Some(code), duration: Some(args.viewer.duration),
-        data_probe: args.common.data_probe,
+        data_probe: args.common.data_probe, firewall_profile: Some(value_name(args.common.firewall_profile)),
     })?;
     save_firewall_counters(args.common.firewall_profile, &out);
     let mut result = analyze_dir(&out)?;
@@ -1377,14 +1465,14 @@ fn load_session(directory: &Path) -> Result<LoadedSession> {
     if let Some(meta) = metas.get("publisher") {
         let mut info = parse_log(&read_text("publisher.log"));
         info.endpoint = meta.endpoint.clone();
-        result.errors.extend(validate(meta, &info, &profile).into_iter().map(|e| format!("publisher: {e}")));
+        result.errors.extend(validate(meta, &info, meta.firewall_profile.as_deref().unwrap_or(&profile)).into_iter().map(|e| format!("publisher: {e}")));
         result.publisher = Some(info);
     }
     let mut viewer_events = BTreeMap::new();
     for (name, meta) in metas.iter().filter(|(_, m)| m.role == "viewer") {
         let mut info = parse_log(&read_text(&format!("{name}.log")));
         info.endpoint = meta.endpoint.clone();
-        result.errors.extend(validate(meta, &info, &profile).into_iter().map(|e| format!("{name}: {e}")));
+        result.errors.extend(validate(meta, &info, meta.firewall_profile.as_deref().unwrap_or(&profile)).into_iter().map(|e| format!("{name}: {e}")));
         let mut viewer = ViewerResult { label: meta.label.clone(), info, ..Default::default() };
         let csv = directory.join(format!("{name}.csv"));
         if csv.exists() {
